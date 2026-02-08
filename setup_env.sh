@@ -31,13 +31,13 @@ source venv/bin/activate
 echo "Upgrading pip..."
 pip install --upgrade pip
 
-# Install PyTorch with CUDA support
+# Install other dependencies FIRST (from PyPI)
+echo "Installing dependencies from requirements.txt..."
+pip install -r requirements.txt
+
+# Install PyTorch with CUDA support LAST (from PyTorch index)
 echo "Installing PyTorch with CUDA 11.8 support..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# Install other dependencies
-echo "Installing other dependencies from requirements.txt..."
-pip install -r requirements.txt
 
 # Verify installation
 echo ""
