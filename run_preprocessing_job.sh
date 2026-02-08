@@ -7,8 +7,9 @@
 #SBATCH --output=logs/preprocess-%j.out
 #SBATCH --error=logs/preprocess-%j.err
 
-# Load modules (adjust versions based on what's available on your cluster)
-module load python/3.9
+# Load modules
+module purge
+module load python/3.11
 module load cuda/11.8
 
 # Activate virtual environment
