@@ -69,6 +69,8 @@ def prepare_chexpert_plus_data(csv_path, image_base_path, split='train'):
     for idx, row in tqdm(df_filtered.iterrows(), total=len(df_filtered), desc="Extracting data"):
         # Image path (relative to base)
         rel_path = row['path_to_image']
+        # Fix file extension: CSV lists .jpg but actual files are .png
+        rel_path = rel_path.replace('.jpg', '.png')
         abs_path = os.path.join(image_base_path, rel_path)
 
         # Check if file exists
