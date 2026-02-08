@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data files (don't commit large datasets)
+*.h5
+*.hdf5
+*.csv
+*.json
+data/
+metadata/
+checkpoints/
+predictions/
+
+# Logs
+logs/
+*.log
+*.out
+*.err
+
+# Jupyter Notebooks
+notebooks/
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Slurm
+slurm-*.out
+slurm-*.err
+
+# Model weights (large files)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Compressed files
+*.zip
+*.tar.gz
+*.gz
