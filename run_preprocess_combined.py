@@ -319,8 +319,8 @@ def main():
 
     # Output paths
     parser.add_argument('--output_dir', type=str,
-                        default='/cbica/projects/CXR/processed',
-                        help='Directory to save processed files')
+                        default='metadata',
+                        help='Directory to save processed files (relative to script location or absolute path)')
     parser.add_argument('--resolution', type=int, default=320,
                         help='Target image resolution (320x320 for CheXzero)')
 
