@@ -57,10 +57,20 @@ mkdir -p logs
 
 ## Running Preprocessing
 
-### Submit Job
+### Option 1: Full Preprocessing (First Time)
 
 ```bash
 sbatch run_preprocessing_job.sh
+```
+
+### Option 2: Resume Preprocessing (After Timeout)
+
+If your job timed out and `metadata/chexpert_plus_train.h5` exists:
+
+```bash
+# This skips CheXpert processing (saves ~12 hours)
+# and only processes ReXGradient + merge
+sbatch run_preprocessing_resume_job.sh
 ```
 
 ### Monitor Job
