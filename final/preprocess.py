@@ -4,10 +4,10 @@ Combined Dataset Preprocessing for CheXpert-Plus + ReXGradient
 Converts images to HDF5 and creates unified CSV with impressions and metadata
 
 Usage:
-    python run_preprocess_combined.py
+    python preprocess.py
 
 Output:
-    /cbica/projects/CXR/processed/
+    metadata/
         ├── combined_train.h5            # Training images (CheXpert-Plus + ReXGradient)
         ├── combined_train.csv           # Training metadata with impressions
         ├── chexpert_plus_valid.h5       # Validation images (CheXpert-Plus only)
@@ -25,41 +25,35 @@ from tqdm import tqdm
 # Import existing preprocessing functions
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from data_process import img_to_hdf5
 
 
 def prepare_chexpert_plus_data(csv_path, image_base_path, split='train'):
     """
-    Prepare CheXpert-Plus data: filter by split and extract paths + impressions + metadata
+    Extract image paths and impressions from CheXpert-Plus CSV
 
     Args:
-        csv_path: Path to CheXpert-Plus CSV file
+        csv_path: Path to CheXpert-Plus metadata CSV
         image_base_path: Base directory containing PNG images
         split: 'train', 'valid', or 'test'
 
     Returns:
-        image_paths: List of absolute paths to images
-        impressions: List of impression texts
-        patient_ids: List of patient IDs
+        tuple: (image_paths, impressions, patient_ids)
     """
     print(f"\n{'='*80}")
-    print(f"Processing CheXpert-Plus ({split} split)...")
+    print(f"Processing CheXpert-Plus {split} set...")
     print(f"{'='*80}")
 
     # Load CSV
-    print(f"Loading CSV: {csv_path}")
     df = pd.read_csv(csv_path)
-    print(f"Total rows in CSV: {len(df)}")
+    print(f"Loaded CSV with {len(df)} total rows")
 
     # Filter by split
     df_filtered = df[df['split'] == split].copy()
-    print(f"Rows with split='{split}': {len(df_filtered)}")
+    print(f"Filtered to {len(df_filtered)} rows for split='{split}'")
 
-    if len(df_filtered) == 0:
-        print(f"⚠ WARNING: No data found for split='{split}'")
-        return [], [], []
-
-    # Extract image paths, impressions, and metadata
+    # Extract paths, impressions, and patient IDs
     image_paths = []
     impressions = []
     patient_ids = []
@@ -79,97 +73,63 @@ def prepare_chexpert_plus_data(csv_path, image_base_path, split='train'):
                 print(f"  Warning: File not found: {abs_path}")
             continue
 
-        # Patient ID
-        patient_id = row['deid_patient_id']
-
-        # Impression text
-        impression = row['section_impression']
-
-        # Handle NaN impressions
-        if pd.isna(impression) or impression == '':
-            impression = " "  # Use space for empty impressions (CheXzero convention)
-
+        # Extract data
         image_paths.append(abs_path)
-        impressions.append(str(impression))
-        patient_ids.append(str(patient_id))
+        impressions.append(str(row['impression']) if pd.notna(row['impression']) else '')
+        patient_ids.append(str(row['patient_id']) if pd.notna(row['patient_id']) else '')
 
-    # Summary
     if failed_count > 0:
-        print(f"  Warning: {failed_count} files not found (skipped)")
+        print(f"  Warning: {failed_count} images not found (skipped)")
 
-    print(f"Extracted {len(image_paths)} valid image paths")
-    print(f"Extracted {len(impressions)} impressions")
-    print(f"Extracted {len(patient_ids)} patient IDs")
+    print(f"Successfully extracted {len(image_paths)} images with impressions")
 
     return image_paths, impressions, patient_ids
 
 
 def prepare_rexgradient_data(json_path, image_base_path):
     """
-    Prepare ReXGradient data: expand multiple images per study from JSON
+    Extract image paths and impressions from ReXGradient JSON
+    Expands multi-view studies into individual images
 
     Args:
-        json_path: Path to ReXGradient JSON metadata file
+        json_path: Path to ReXGradient metadata JSON
         image_base_path: Base directory containing images
 
     Returns:
-        image_paths: List of absolute paths to images (expanded)
-        impressions: List of impression texts (replicated per image)
-        patient_ids: List of patient IDs (replicated per image)
+        tuple: (image_paths, impressions, patient_ids)
     """
     print(f"\n{'='*80}")
-    print(f"Processing ReXGradient...")
+    print(f"Processing ReXGradient dataset...")
     print(f"{'='*80}")
 
     # Load JSON
-    print(f"Loading JSON: {json_path}")
     with open(json_path, 'r') as f:
         data = json.load(f)
 
-    print(f"Total studies in JSON: {len(data)}")
+    print(f"Loaded {len(data)} studies from JSON")
 
+    # Expand each study into individual images
     image_paths = []
     impressions = []
     patient_ids = []
-    failed_count = 0
 
-    # Each study can have multiple images (PA, LATERAL, etc.)
     for study_id, study_data in tqdm(data.items(), desc="Expanding images"):
-        # Get patient ID
-        patient_id = study_data.get('PatientID', 'UNKNOWN')
-
-        # Get impression (same for all images in study)
-        impression = study_data.get('Impression', '')
-        if pd.isna(impression) or impression == '':
-            impression = " "  # Use space for empty impressions
+        # Get impression for this study
+        impression = study_data.get('impression', '')
+        patient_id = study_data.get('subject_id', study_id)
 
         # Get all image paths for this study
-        image_path_list = study_data.get('ImagePath', [])
+        study_images = study_data.get('image_path', [])
 
-        # Create one training instance per image
-        # (Same impression replicated for all images in the study)
-        for rel_path in image_path_list:
-            # Convert relative path to absolute
-            # rel_path format: "../deid_png/PATIENT/ACCESSION/studies/.../instances/....png"
-            clean_path = rel_path.replace('../', '')
-            abs_path = os.path.join(image_base_path, clean_path)
+        # Add each image with the same impression
+        for img_rel_path in study_images:
+            img_abs_path = os.path.join(image_base_path, img_rel_path)
 
-            # Check if file exists
-            if not os.path.exists(abs_path):
-                failed_count += 1
-                if failed_count <= 3:  # Show first 3 failures
-                    print(f"  Warning: File not found: {abs_path}")
-                continue
+            if os.path.exists(img_abs_path):
+                image_paths.append(img_abs_path)
+                impressions.append(impression)
+                patient_ids.append(str(patient_id))
 
-            image_paths.append(abs_path)
-            impressions.append(str(impression))
-            patient_ids.append(str(patient_id))
-
-    # Summary
-    if failed_count > 0:
-        print(f"Warning: {failed_count} files not found (skipped)")
-
-    print(f"Extracted {len(image_paths)} valid image paths")
     print(f"Expanded from {len(data)} studies to {len(image_paths)} images")
     print(f"Each study impression replicated for all its images")
 
@@ -254,10 +214,10 @@ def create_combined_csv(cp_paths, cp_impressions, cp_patient_ids,
         rx_paths: ReXGradient image paths
         rx_impressions: ReXGradient impressions
         rx_patient_ids: ReXGradient patient IDs
-        output_csv: Output CSV path
+        output_csv: Path to save combined CSV
 
     Returns:
-        combined_df: Combined DataFrame
+        pd.DataFrame: Combined metadata DataFrame
     """
     print(f"\n{'='*80}")
     print("Creating combined CSV with metadata...")
@@ -268,7 +228,8 @@ def create_combined_csv(cp_paths, cp_impressions, cp_patient_ids,
         'image_path': cp_paths,
         'patient_id': cp_patient_ids,
         'impression': cp_impressions,
-        'source': 'CheXpert-Plus'
+        'source': 'chexpert_plus',
+        'dataset_index': range(len(cp_paths))
     })
 
     # Create ReXGradient DataFrame
@@ -276,52 +237,48 @@ def create_combined_csv(cp_paths, cp_impressions, cp_patient_ids,
         'image_path': rx_paths,
         'patient_id': rx_patient_ids,
         'impression': rx_impressions,
-        'source': 'ReXGradient'
+        'source': 'rexgradient',
+        'dataset_index': range(len(cp_paths), len(cp_paths) + len(rx_paths))
     })
 
-    # Combine (CheXpert-Plus first, then ReXGradient)
+    # Combine DataFrames
     combined_df = pd.concat([cp_df, rx_df], ignore_index=True)
-
-    # Add dataset index (matches HDF5 row index)
-    combined_df['dataset_index'] = range(len(combined_df))
-
-    print(f"  CheXpert-Plus: {len(cp_df)} rows")
-    print(f"  ReXGradient:   {len(rx_df)} rows")
-    print(f"  Combined:      {len(combined_df)} rows")
 
     # Save to CSV
     combined_df.to_csv(output_csv, index=False)
 
-    print(f"  ✓ Saved to: {output_csv}")
-    print(f"  ✓ Columns: {list(combined_df.columns)}")
+    print(f"  ✓ Saved combined CSV: {output_csv}")
+    print(f"    Total rows: {len(combined_df)}")
+    print(f"    - CheXpert-Plus: {len(cp_df)} rows")
+    print(f"    - ReXGradient:   {len(rx_df)} rows")
 
     return combined_df
 
 
 def verify_alignment(h5_path, csv_path):
     """
-    Verify that HDF5 and CSV have matching row counts
+    Verify that HDF5 and CSV are properly aligned
 
     Args:
         h5_path: Path to HDF5 file
         csv_path: Path to CSV file
     """
-    with h5py.File(h5_path, 'r') as h5f:
-        n_images = len(h5f['cxr'])
+    with h5py.File(h5_path, 'r') as f:
+        h5_count = len(f['cxr'])
 
     df = pd.read_csv(csv_path)
-    n_rows = len(df)
+    csv_count = len(df)
 
-    if n_images == n_rows:
-        print(f"  ✓ Alignment verified: {n_images} images = {n_rows} CSV rows")
+    if h5_count == csv_count:
+        print(f"  ✓ Alignment verified: {h5_count} images in HDF5 match {csv_count} rows in CSV")
     else:
-        print(f"  ✗ ALIGNMENT ERROR: {n_images} images ≠ {n_rows} CSV rows")
-        raise ValueError("HDF5 and CSV row counts do not match!")
+        print(f"  ✗ ALIGNMENT ERROR: {h5_count} images in HDF5 vs {csv_count} rows in CSV")
+        raise ValueError("HDF5-CSV alignment mismatch!")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Preprocess CheXpert-Plus + ReXGradient datasets',
+        description='Combined preprocessing for CheXpert-Plus + ReXGradient datasets',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -344,29 +301,16 @@ def main():
     # Output paths
     parser.add_argument('--output_dir', type=str,
                         default='metadata',
-                        help='Directory to save processed files (relative to script location or absolute path)')
+                        help='Directory to save processed files')
     parser.add_argument('--resolution', type=int, default=320,
-                        help='Target image resolution (320x320 for CheXzero)')
+                        help='Target image resolution (320x320)')
 
     args = parser.parse_args()
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Print configuration
-    print("\n" + "="*80)
-    print("COMBINED DATASET PREPROCESSING PIPELINE")
-    print("="*80)
-    print(f"Configuration:")
-    print(f"  Output directory:    {args.output_dir}")
-    print(f"  Target resolution:   {args.resolution}x{args.resolution}")
-    print(f"\nInput paths:")
-    print(f"  CheXpert CSV:        {args.cp_csv}")
-    print(f"  CheXpert Images:     {args.cp_image_base}")
-    print(f"  ReXGradient JSON:    {args.rx_json}")
-    print(f"  ReXGradient Images:  {args.rx_image_base}")
-
-    # ========== STEP 1: Prepare CheXpert-Plus Training Data ==========
+    # ========== STEP 1: Process CheXpert-Plus Training Set ==========
     cp_paths, cp_impressions, cp_patient_ids = prepare_chexpert_plus_data(
         csv_path=args.cp_csv,
         image_base_path=args.cp_image_base,
@@ -376,11 +320,10 @@ def main():
     # Convert to HDF5
     cp_h5_path = os.path.join(args.output_dir, 'chexpert_plus_train.h5')
     print(f"\nConverting CheXpert-Plus images to HDF5...")
-    # print(f"This may take 1-3 hours depending on dataset size...")
     img_to_hdf5(cp_paths, cp_h5_path, resolution=args.resolution)
-    print(f"Saved: {cp_h5_path}")
+    print(f"✓ Saved: {cp_h5_path}")
 
-    # ========== STEP 2: Prepare ReXGradient Training Data ==========
+    # ========== STEP 2: Process ReXGradient Training Set ==========
     rx_paths, rx_impressions, rx_patient_ids = prepare_rexgradient_data(
         json_path=args.rx_json,
         image_base_path=args.rx_image_base
@@ -389,15 +332,14 @@ def main():
     # Convert to HDF5
     rx_h5_path = os.path.join(args.output_dir, 'rexgradient_train.h5')
     print(f"\nConverting ReXGradient images to HDF5...")
-    # print(f"This may take 30min-2 hours depending on dataset size...")
     img_to_hdf5(rx_paths, rx_h5_path, resolution=args.resolution)
-    print(f"Saved: {rx_h5_path}")
+    print(f"✓ Saved: {rx_h5_path}")
 
     # ========== STEP 3: Merge HDF5 Files ==========
     combined_h5_path = os.path.join(args.output_dir, 'combined_train.h5')
     merge_hdf5_files(cp_h5_path, rx_h5_path, combined_h5_path)
 
-    # ========== STEP 4: Create Combined CSV with Metadata ==========
+    # ========== STEP 4: Create Combined CSV ==========
     combined_csv_path = os.path.join(args.output_dir, 'combined_train.csv')
     combined_df = create_combined_csv(
         cp_paths, cp_impressions, cp_patient_ids,
@@ -409,9 +351,9 @@ def main():
     print(f"\nVerifying HDF5-CSV alignment...")
     verify_alignment(combined_h5_path, combined_csv_path)
 
-    # ========== STEP 5: Process Validation Set (CheXpert-Plus Only) ==========
+    # ========== STEP 5: Process Validation Set ==========
     print(f"\n{'='*80}")
-    print("Processing CheXpert-Plus validation set...")
+    print("Processing validation set...")
     print(f"{'='*80}")
 
     cp_val_paths, cp_val_impressions, cp_val_patient_ids = prepare_chexpert_plus_data(
@@ -420,13 +362,12 @@ def main():
         split='valid'
     )
 
-    # Convert validation images to HDF5
     cp_val_h5_path = os.path.join(args.output_dir, 'chexpert_plus_valid.h5')
     print(f"\nConverting validation images to HDF5...")
     img_to_hdf5(cp_val_paths, cp_val_h5_path, resolution=args.resolution)
-    print(f"Saved: {cp_val_h5_path}")
+    print(f"✓ Saved: {cp_val_h5_path}")
 
-    # Save validation CSV with metadata
+    # Save validation CSV
     cp_val_csv = os.path.join(args.output_dir, 'chexpert_plus_valid.csv')
     val_df = pd.DataFrame({
         'image_path': cp_val_paths,
@@ -435,46 +376,11 @@ def main():
         'dataset_index': range(len(cp_val_paths))
     })
     val_df.to_csv(cp_val_csv, index=False)
-    print(f"Saved validation CSV to: {cp_val_csv}")
+    print(f"✓ Saved validation CSV: {cp_val_csv}")
 
     # Verify validation alignment
     print(f"\nVerifying validation HDF5-CSV alignment...")
     verify_alignment(cp_val_h5_path, cp_val_csv)
-
-    # ========== STEP 6: Process Test Set (CheXpert-Plus Only) - COMMENTED OUT ==========
-    # Uncomment this section when you're ready to process the test set
-    """
-    print(f"\n{'='*80}")
-    print("Processing CheXpert-Plus test set...")
-    print(f"{'='*80}")
-
-    cp_test_paths, cp_test_impressions, cp_test_patient_ids = prepare_chexpert_plus_data(
-        csv_path=args.cp_csv,
-        image_base_path=args.cp_image_base,
-        split='test'
-    )
-
-    # Convert test images to HDF5
-    cp_test_h5_path = os.path.join(args.output_dir, 'chexpert_plus_test.h5')
-    print(f"\nConverting test images to HDF5...")
-    img_to_hdf5(cp_test_paths, cp_test_h5_path, resolution=args.resolution)
-    print(f"Saved: {cp_test_h5_path}")
-
-    # Save test CSV with metadata
-    cp_test_csv = os.path.join(args.output_dir, 'chexpert_plus_test.csv')
-    test_df = pd.DataFrame({
-        'image_path': cp_test_paths,
-        'patient_id': cp_test_patient_ids,
-        'impression': cp_test_impressions,
-        'dataset_index': range(len(cp_test_paths))
-    })
-    test_df.to_csv(cp_test_csv, index=False)
-    print(f"Saved test CSV to: {cp_test_csv}")
-
-    # Verify test alignment
-    print(f"\nVerifying test HDF5-CSV alignment...")
-    verify_alignment(cp_test_h5_path, cp_test_csv)
-    """
 
     # ========== FINAL SUMMARY ==========
     print("\n" + "="*80)
@@ -490,19 +396,13 @@ def main():
     print(f"    Images:  {cp_val_h5_path}")
     print(f"    Metadata: {cp_val_csv}")
 
-    # print(f"\n  Test (when uncommented):")
-    # print(f"    Images:  {os.path.join(args.output_dir, 'chexpert_plus_test.h5')}")
-    # print(f"    Metadata: {os.path.join(args.output_dir, 'chexpert_plus_test.csv')}")
-
     print(f"\n Dataset Statistics:")
     print(f"    Training Set:   {len(combined_df)} samples")
     print(f"      - CheXpert-Plus: {len(cp_paths)} images")
     print(f"      - ReXGradient:   {len(rx_paths)} images")
     print(f"    Validation Set: {len(val_df)} samples")
-    print(f"      - CheXpert-Plus: {len(cp_val_paths)} images")
 
     print(f"\n CSV Structure:")
-    print(f"    Columns: {list(combined_df.columns)}")
     print(f"    - image_path:    Full path to original image")
     print(f"    - patient_id:    Patient identifier")
     print(f"    - impression:    Text report (used for training)")
