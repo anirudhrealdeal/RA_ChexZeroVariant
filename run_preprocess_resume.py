@@ -91,17 +91,34 @@ def main():
 
     print(f"✓ Extracted {len(cp_paths)} CheXpert-Plus metadata entries")
 
-    # ========== STEP 2: Process ReXGradient (This is what we need to do) ==========
-    rx_paths, rx_impressions, rx_patient_ids = prepare_rexgradient_data(
-        json_path=args.rx_json,
-        image_base_path=args.rx_image_base
-    )
-
-    # Convert to HDF5
+    # ========== STEP 2: Process ReXGradient (Skip if already done) ==========
     rx_h5_path = os.path.join(args.output_dir, 'rexgradient_train.h5')
-    print(f"\nConverting ReXGradient images to HDF5...")
-    img_to_hdf5(rx_paths, rx_h5_path, resolution=args.resolution)
-    print(f"✓ Saved: {rx_h5_path}")
+
+    if os.path.exists(rx_h5_path):
+        print(f"\n{'='*80}")
+        print(f"✓ Found existing ReXGradient HDF5: {rx_h5_path}")
+        print(f"Skipping ReXGradient image processing (already complete)")
+        print(f"{'='*80}")
+
+        # Still need to extract metadata for CSV creation
+        rx_paths, rx_impressions, rx_patient_ids = prepare_rexgradient_data(
+            json_path=args.rx_json,
+            image_base_path=args.rx_image_base
+        )
+    else:
+        print(f"\n{'='*80}")
+        print(f"Processing ReXGradient dataset...")
+        print(f"{'='*80}")
+
+        rx_paths, rx_impressions, rx_patient_ids = prepare_rexgradient_data(
+            json_path=args.rx_json,
+            image_base_path=args.rx_image_base
+        )
+
+        # Convert to HDF5
+        print(f"\nConverting ReXGradient images to HDF5...")
+        img_to_hdf5(rx_paths, rx_h5_path, resolution=args.resolution)
+        print(f"✓ Saved: {rx_h5_path}")
 
     # ========== STEP 3: Merge HDF5 Files ==========
     combined_h5_path = os.path.join(args.output_dir, 'combined_train.h5')

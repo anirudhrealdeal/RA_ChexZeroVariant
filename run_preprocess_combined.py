@@ -18,7 +18,6 @@ import os
 import json
 import argparse
 import pandas as pd
-import numpy as np
 import h5py
 from pathlib import Path
 from tqdm import tqdm
@@ -179,7 +178,8 @@ def prepare_rexgradient_data(json_path, image_base_path):
 
 def merge_hdf5_files(file1, file2, output_file):
     """
-    Merge two HDF5 files into one combined file
+    Merge two HDF5 files into one combined file using chunked copying
+    to avoid loading entire datasets into memory
 
     Args:
         file1: Path to first HDF5 file (CheXpert-Plus)
@@ -187,35 +187,57 @@ def merge_hdf5_files(file1, file2, output_file):
         output_file: Path to output merged HDF5 file
     """
     print(f"\n{'='*80}")
-    print("Merging HDF5 files...")
+    print("Merging HDF5 files (chunked, memory-efficient)...")
     print(f"{'='*80}")
 
     with h5py.File(file1, 'r') as f1, \
          h5py.File(file2, 'r') as f2, \
          h5py.File(output_file, 'w') as out:
 
-        # Read data from both files
-        data1 = f1['cxr'][:]
-        data2 = f2['cxr'][:]
+        # Get shapes without loading data
+        shape1 = f1['cxr'].shape
+        shape2 = f2['cxr'].shape
+        n1, h1, w1, c1 = shape1
+        n2, h2, w2, c2 = shape2
 
-        print(f"  CheXpert-Plus: {len(data1)} images, shape {data1.shape}")
-        print(f"  ReXGradient:   {len(data2)} images, shape {data2.shape}")
+        print(f"  CheXpert-Plus: {n1} images, shape {shape1}")
+        print(f"  ReXGradient:   {n2} images, shape {shape2}")
 
-        # Concatenate along first axis (stack images)
-        combined = np.concatenate([data1, data2], axis=0)
+        # Verify shapes match (except first dimension)
+        if (h1, w1, c1) != (h2, w2, c2):
+            raise ValueError(f"Shape mismatch: {shape1} vs {shape2}")
 
-        print(f"  Combined:      {len(combined)} images, shape {combined.shape}")
+        # Create output dataset with combined shape
+        total_n = n1 + n2
+        combined_shape = (total_n, h1, w1, c1)
+        print(f"  Combined:      {total_n} images, shape {combined_shape}")
 
-        # Save to output file with compression
-        out.create_dataset('cxr', data=combined, compression='gzip', compression_opts=4)
+        # Create dataset with compression and chunking for efficient I/O
+        chunk_size = (min(1000, total_n), h1, w1, c1)
+        out.create_dataset('cxr', shape=combined_shape, dtype=f1['cxr'].dtype,
+                          compression='gzip', compression_opts=4,
+                          chunks=chunk_size)
+
+        # Copy data1 in chunks (memory-efficient)
+        print(f"  Copying CheXpert-Plus data...")
+        chunk_batch = 1000
+        for i in tqdm(range(0, n1, chunk_batch), desc="  CheXpert chunks"):
+            end_idx = min(i + chunk_batch, n1)
+            out['cxr'][i:end_idx] = f1['cxr'][i:end_idx]
+
+        # Copy data2 in chunks (memory-efficient)
+        print(f"  Copying ReXGradient data...")
+        for i in tqdm(range(0, n2, chunk_batch), desc="  ReXGradient chunks"):
+            end_idx = min(i + chunk_batch, n2)
+            out['cxr'][n1 + i:n1 + end_idx] = f2['cxr'][i:end_idx]
 
         # Store metadata as attributes
-        out.attrs['n_chexpert_plus'] = len(data1)
-        out.attrs['n_rexgradient'] = len(data2)
-        out.attrs['total'] = len(combined)
-        out.attrs['resolution'] = data1.shape[1]  # Assuming square images
+        out.attrs['n_chexpert_plus'] = n1
+        out.attrs['n_rexgradient'] = n2
+        out.attrs['total'] = total_n
+        out.attrs['resolution'] = h1
 
-        print(f"  ✓ Merged: {len(data1)} + {len(data2)} = {len(combined)} images")
+        print(f"  ✓ Merged: {n1} + {n2} = {total_n} images")
         print(f"  ✓ Saved to: {output_file}")
 
 
