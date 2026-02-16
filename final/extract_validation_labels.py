@@ -18,13 +18,16 @@ CHEXPERT_LABELS = [
 
 def convert_label_value(value):
     """
-    Convert CheXbert label values to binary:
+    Convert CheXbert label values to binary (U-Positive strategy):
     - 1.0 → 1 (present)
+    - -1.0 → 1 (uncertain, treated as POSITIVE per CheXzero/CheXpert competition)
     - 0.0 → 0 (absent)
-    - -1.0 → 0 (uncertain, treated as absent)
     - null → 0 (not mentioned, treated as absent)
+
+    Note: This follows the CheXpert competition U-Positive policy where
+    uncertain labels are treated as positive for evaluation.
     """
-    if value == 1.0:
+    if value == 1.0 or value == -1.0:  # U-Positive: uncertain = positive
         return 1
     else:
         return 0

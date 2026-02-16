@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-PLIP-Style Training: DINOv2 Vision Encoder + CLIP Text Encoder
-Contrastive learning on CheXpert-Plus + ReXGradient datasets
+PLIP-Style Training: Pretrained DINOv3 ViT-B/16 + Pretrained CLIP Text Encoder
+Contrastive learning on CheXpert-Plus + ReXGradient datasets (462K image-text pairs)
+
+Training Strategy (following training_strategy.md):
+- Vision: Pretrained DINOv3 ViT-B/16 (expects 224x224, outputs 768-dim)
+- Text: Pretrained CLIP ViT-B/32 text encoder (outputs 512-dim)
+- Projection: Vision 768 → 512 (simple linear layer to match text space)
+- Shared embedding space: 512-dim (CLIP's latent space)
+- Images stored at 320x320 in HDF5, resized to 224x224 during training
+- CheXzero hyperparameters: batch_size=64, lr=1e-4, SGD with momentum=0.9
+- PLIP strategy: 25,000 total steps, validate/save every 500 steps
+- Augmentations (train only): RandomResizedCrop(224, scale=0.9-1.0) + RandomHorizontalFlip
+- Normalization: CLIP stats (not ImageNet)
+
 Usage:
     python train_plip.py --data_dir metadata --checkpoint_dir checkpoints
 """
@@ -13,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast, GradScaler
+from torchvision.transforms import Compose, Resize, RandomResizedCrop, RandomHorizontalFlip, Normalize, InterpolationMode
 import h5py
 import pandas as pd
 import numpy as np
@@ -27,55 +40,92 @@ from simple_tokenizer import SimpleTokenizer
 
 
 class CXRDataset(Dataset):
-    """Dataset for chest X-ray images and impressions"""
+    """Dataset for chest X-ray images and impressions with CLIP-style augmentations"""
 
-    def __init__(self, h5_path, csv_path, tokenizer, max_length=77):
+    def __init__(self, h5_path, csv_path, tokenizer, max_length=77, input_resolution=224, is_training=True):
         """
         Args:
-            h5_path: Path to HDF5 file with images
+            h5_path: Path to HDF5 file with images (stored at 320x320)
             csv_path: Path to CSV file with impressions
             tokenizer: Text tokenizer
             max_length: Maximum token length
+            input_resolution: Target resolution for model input (224 for pretrained DINOv3)
+            is_training: If True, applies training augmentations (RandomResizedCrop + Flip)
         """
         self.h5_path = h5_path
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.input_resolution = input_resolution
+        self.is_training = is_training
+
+        # Lazy HDF5 file handle (opened once per DataLoader worker for performance)
+        # Opening/closing file on every __getitem__ call creates massive I/O bottleneck
+        # With 8 workers, this reduces file opens from ~462k/epoch to just 8 total
+        self._h5_file = None
+
+        # CLIP normalization statistics (from OpenAI CLIP weights)
+        # These are the stats the CLIP text encoder was trained with
+        clip_mean = [0.48145466, 0.4578275, 0.40821073]
+        clip_std = [0.26862954, 0.26130258, 0.27577711]
+
+        # Training augmentations (following PLIP/medical CLIP best practices)
+        if is_training:
+            self.transform = Compose([
+                RandomResizedCrop(
+                    input_resolution,
+                    scale=(0.9, 1.0),  # Slight crop variation for robustness
+                    interpolation=InterpolationMode.BICUBIC
+                ),
+                RandomHorizontalFlip(p=0.5),  # Anatomically safe for chest X-rays
+                Normalize(mean=clip_mean, std=clip_std)
+            ])
+        else:
+            # Validation: no augmentation, just resize and normalize
+            self.transform = Compose([
+                Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
+                Normalize(mean=clip_mean, std=clip_std)
+            ])
 
         # Load CSV metadata
         self.df = pd.read_csv(csv_path)
 
-        # Verify HDF5 alignment
+        # Verify HDF5 alignment (temporary file open for validation)
         with h5py.File(h5_path, 'r') as f:
             h5_count = len(f['cxr'])
 
         if h5_count != len(self.df):
             raise ValueError(f"HDF5 ({h5_count}) and CSV ({len(self.df)}) size mismatch!")
 
-        print(f"Loaded dataset with {len(self.df)} samples")
+        mode = "training" if is_training else "validation"
+        print(f"Loaded {mode} dataset with {len(self.df)} samples (target resolution: {input_resolution}x{input_resolution})")
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
-        # Load image from HDF5
-        with h5py.File(self.h5_path, 'r') as f:
-            image = f['cxr'][idx]  # Shape: (320, 320) grayscale
+        # Lazy open HDF5 file (once per worker for massive performance gain)
+        # Each DataLoader worker gets its own file handle (thread-safe)
+        if self._h5_file is None:
+            self._h5_file = h5py.File(self.h5_path, 'r')
+
+        # Load image from cached HDF5 handle (no open/close overhead)
+        image = self._h5_file['cxr'][idx]  # Shape: (320, 320) grayscale
 
         # Convert to tensor and normalize to [0, 1]
         image = torch.from_numpy(image).float() / 255.0
 
         # Convert grayscale to RGB by repeating channels
-        # DINOv2 expects 3-channel input
+        # Both DINOv3 and CLIP expect 3-channel input
         if image.dim() == 2:
             image = image.unsqueeze(0).repeat(3, 1, 1)  # (H, W) -> (3, H, W)
         elif image.dim() == 3:
             # Already (H, W, C), rearrange to (C, H, W)
             image = image.permute(2, 0, 1)
 
-        # Normalize with ImageNet stats (for DINOv2)
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        image = (image - mean) / std
+        # Apply transforms: augmentation + resize + CLIP normalization
+        # Training: RandomResizedCrop + HorizontalFlip + Normalize
+        # Validation: Resize + Normalize only
+        image = self.transform(image)
 
         # Get impression text
         impression = str(self.df.iloc[idx]['impression'])
@@ -98,94 +148,87 @@ class CXRDataset(Dataset):
 
 class PLIPModel(nn.Module):
     """
-    PLIP-style model: DINOv2 vision encoder + CLIP text encoder
+    PLIP-style model: Pretrained DINOv3 vision encoder + Pretrained CLIP text encoder
     with contrastive learning objective
+
+    Architecture (following training_strategy.md):
+    - Vision: Pretrained DINOv3 ViT-B/16 (expects 224x224 input, outputs 768-dim)
+    - Text: Pretrained CLIP ViT-B/32 text encoder (outputs 512-dim)
+    - Projection: Simple linear layer mapping vision 768 → 512 to match text space
+    - Shared embedding space: 512-dim (CLIP's latent space)
     """
 
     def __init__(self, embed_dim=512, temperature=0.07):
         """
         Args:
-            embed_dim: Embedding dimension for both vision and text
-            temperature: Temperature parameter for contrastive loss
+            embed_dim: Shared embedding dimension (512 to match CLIP text space)
+            temperature: Initial temperature parameter for contrastive loss
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.temperature = nn.Parameter(torch.ones([]) * temperature)
 
-        # Load DINOv2 vision encoder (ViT-B/14)
-        print("Loading DINOv2 ViT-B/14...")
-        self.vision_encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        # Load pretrained DINOv3 vision encoder (ViT-B/16)
+        # Pretrained on ImageNet with self-supervised learning
+        # Expects 224x224 input, outputs 768-dim features
+        print("Loading pretrained DINOv3 ViT-B/16 (expects 224x224 input)...")
+        self.vision_encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb16')
 
-        # DINOv2 ViT-B/14 outputs 768-dim features
+        # DINOv3 ViT-B/16 outputs 768-dim features
         vision_width = 768
 
-        # Projection head for vision features
-        self.vision_projection = nn.Sequential(
-            nn.Linear(vision_width, embed_dim * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(embed_dim * 2, embed_dim)
-        )
+        # Simple linear projection: 768 → 512 (no MLP, following training_strategy.md)
+        # This "bridge" layer aligns DINOv3 features to CLIP's text latent space
+        self.vision_projection = nn.Linear(vision_width, embed_dim)
 
-        # Load CLIP text encoder
-        print("Loading CLIP text encoder...")
+        # Load CLIP text encoder (ViT-B/32)
+        # This is the same text encoder used in CheXzero
+        print("Loading pretrained CLIP ViT-B/32 text encoder...")
         clip_model, _ = load_clip("ViT-B/32", device="cpu", jit=False)
 
-        self.text_encoder = clip_model.encode_text
         self.token_embedding = clip_model.token_embedding
         self.positional_embedding = clip_model.positional_embedding
         self.transformer = clip_model.transformer
         self.ln_final = clip_model.ln_final
         self.text_projection_clip = clip_model.text_projection
 
-        # CLIP text outputs 512-dim features
-        text_width = 512
-
-        # Projection head for text features (if embed_dim != 512)
-        if embed_dim != text_width:
-            self.text_projection = nn.Sequential(
-                nn.Linear(text_width, embed_dim * 2),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(embed_dim * 2, embed_dim)
-            )
-        else:
-            self.text_projection = nn.Identity()
+        # CLIP text encoder outputs 512-dim features (matches our shared embedding space)
+        # No additional projection needed since embed_dim=512
 
         # Learnable logit scale (like CLIP)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def encode_image(self, images):
         """
-        Encode images using DINOv2 + projection
+        Encode images using pretrained DINOv3 + simple linear projection
 
         Args:
-            images: (B, 3, H, W) tensor
+            images: (B, 3, 224, 224) tensor (pretrained DINOv3 ViT-B/16 expects 224x224)
 
         Returns:
-            (B, embed_dim) normalized embeddings
+            (B, 512) normalized embeddings
         """
-        # DINOv2 encoding
+        # DINOv3 ViT-B/16 encoding (pretrained on ImageNet with self-supervised learning)
         features = self.vision_encoder(images)  # (B, 768)
 
-        # Project to embed_dim
-        embeddings = self.vision_projection(features)  # (B, embed_dim)
+        # Simple linear projection to CLIP's 512-dim latent space
+        embeddings = self.vision_projection(features)  # (B, 512)
 
-        # L2 normalize
+        # L2 normalize (standard for contrastive learning)
         embeddings = F.normalize(embeddings, dim=-1)
 
         return embeddings
 
     def encode_text(self, text_tokens):
         """
-        Encode text using CLIP text encoder + projection
+        Encode text using CLIP text encoder (no additional projection needed)
 
         Args:
-            text_tokens: (B, seq_len) tensor of token IDs
+            text_tokens: (B, 77) tensor of token IDs (CLIP's context length limit)
 
         Returns:
-            (B, embed_dim) normalized embeddings
+            (B, 512) normalized embeddings
         """
         # CLIP text encoding
         x = self.token_embedding(text_tokens)
@@ -195,29 +238,27 @@ class PLIPModel(nn.Module):
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x)
 
-        # Take features from [EOS] token
-        x = x[torch.arange(x.shape[0]), text_tokens.argmax(dim=-1)] @ self.text_projection_clip
+        # Take features from [EOS] token and apply CLIP's text projection
+        # This outputs 512-dim embeddings (CLIP's native latent space)
+        embeddings = x[torch.arange(x.shape[0]), text_tokens.argmax(dim=-1)] @ self.text_projection_clip
 
-        # Project to embed_dim (if needed)
-        embeddings = self.text_projection(x)  # (B, embed_dim)
-
-        # L2 normalize
+        # L2 normalize (standard for contrastive learning)
         embeddings = F.normalize(embeddings, dim=-1)
 
         return embeddings
 
     def forward(self, images, text_tokens):
         """
-        Forward pass: compute image and text embeddings
+        Forward pass: compute image and text embeddings in shared 512-dim space
 
         Args:
-            images: (B, 3, H, W)
-            text_tokens: (B, seq_len)
+            images: (B, 3, 224, 224) - augmented/resized from 320x320 HDF5 storage
+            text_tokens: (B, 77) - tokenized impressions (CLIP's 77 token limit)
 
         Returns:
-            image_embeddings: (B, embed_dim)
-            text_embeddings: (B, embed_dim)
-            logit_scale: scalar
+            image_embeddings: (B, 512) - L2 normalized in CLIP's latent space
+            text_embeddings: (B, 512) - L2 normalized in CLIP's latent space
+            logit_scale: scalar - learnable temperature for contrastive loss
         """
         image_embeddings = self.encode_image(images)
         text_embeddings = self.encode_text(text_tokens)
@@ -253,42 +294,6 @@ def contrastive_loss(image_embeddings, text_embeddings, logit_scale):
     loss = (loss_i2t + loss_t2i) / 2
 
     return loss
-
-
-def train_epoch(model, dataloader, optimizer, scaler, device, epoch):
-    """Train for one epoch"""
-    model.train()
-
-    total_loss = 0
-    num_batches = 0
-
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
-
-    for images, text_tokens in pbar:
-        images = images.to(device)
-        text_tokens = text_tokens.to(device)
-
-        optimizer.zero_grad()
-
-        # Forward pass with mixed precision
-        with autocast():
-            image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
-            loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
-
-        # Backward pass
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        # Track loss
-        total_loss += loss.item()
-        num_batches += 1
-
-        # Update progress bar
-        pbar.set_postfix({'loss': loss.item(), 'logit_scale': logit_scale.item()})
-
-    avg_loss = total_loss / num_batches
-    return avg_loss
 
 
 @torch.no_grad()
@@ -332,29 +337,32 @@ def main():
     parser.add_argument('--val_csv', type=str, default=None,
                         help='Validation CSV file (overrides data_dir)')
 
-    # Model hyperparameters
+    # Model hyperparameters (from training_strategy.md)
     parser.add_argument('--embed_dim', type=int, default=512,
-                        help='Embedding dimension')
+                        help='Shared embedding dimension (512 = CLIP text latent space)')
     parser.add_argument('--temperature', type=float, default=0.07,
                         help='Initial temperature for contrastive loss')
 
-    # Training hyperparameters
-    parser.add_argument('--batch_size', type=int, default=128,
-                        help='Batch size')
-    parser.add_argument('--num_epochs', type=int, default=50,
-                        help='Number of training epochs')
+    # Training hyperparameters (from training_strategy.md + CheXzero paper)
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Batch size (CheXzero paper best model uses 64)')
+    parser.add_argument('--max_steps', type=int, default=25000,
+                        help='Total training steps (PLIP strategy, not epoch-based)')
     parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01,
-                        help='Weight decay')
-    parser.add_argument('--warmup_epochs', type=int, default=1,
-                        help='Number of warmup epochs')
+                        help='Learning rate (CheXzero uses 1e-4)')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='SGD momentum (CheXzero uses 0.9)')
+    parser.add_argument('--optimizer', type=str, default='sgd',
+                        choices=['sgd', 'adamw'],
+                        help='Optimizer type (CheXzero uses SGD)')
 
-    # Output paths
+    # Output paths (PLIP strategy: save by steps)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
-    parser.add_argument('--save_freq', type=int, default=5,
-                        help='Save checkpoint every N epochs')
+    parser.add_argument('--save_steps', type=int, default=500,
+                        help='Save checkpoint every N steps (PLIP: 500)')
+    parser.add_argument('--val_steps', type=int, default=500,
+                        help='Validate every N steps (PLIP: 500, select best model)')
 
     # System
     parser.add_argument('--num_workers', type=int, default=8,
@@ -387,10 +395,10 @@ def main():
 
     # Create datasets
     print(f"\nLoading training data from {args.train_h5}...")
-    train_dataset = CXRDataset(args.train_h5, args.train_csv, tokenizer)
+    train_dataset = CXRDataset(args.train_h5, args.train_csv, tokenizer, is_training=True)
 
     print(f"\nLoading validation data from {args.val_h5}...")
-    val_dataset = CXRDataset(args.val_h5, args.val_csv, tokenizer)
+    val_dataset = CXRDataset(args.val_h5, args.val_csv, tokenizer, is_training=False)
 
     # Create dataloaders
     train_loader = DataLoader(
@@ -420,75 +428,130 @@ def main():
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
-    # Initialize optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
+    # Initialize optimizer (CheXzero uses SGD with momentum)
+    if args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args.lr,
+            momentum=args.momentum
+        )
+    else:  # adamw
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr
+        )
 
-    # Learning rate scheduler with warmup
-    def lr_lambda(epoch):
-        if epoch < args.warmup_epochs:
-            return (epoch + 1) / args.warmup_epochs
-        else:
-            return 1.0
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # No learning rate scheduler (CheXzero uses constant LR)
 
     # Mixed precision scaler
     scaler = GradScaler()
 
-    # Training loop
-    print(f"\nStarting training for {args.num_epochs} epochs...")
+    # Training loop - PLIP strategy: step-based (not epoch-based), validate frequently
+    print(f"\nStarting training for {args.max_steps} steps (PLIP strategy: step-based, frequent validation)...")
+    print(f"  Dataset size: {len(train_dataset)} samples")
+    print(f"  Batch size: {args.batch_size}")
+    print(f"  Steps per epoch: ~{len(train_loader)}")
+    print(f"  Estimated epochs: ~{args.max_steps / len(train_loader):.2f}")
+
     best_val_loss = float('inf')
+    global_step = 0
+    running_loss = 0
+    num_loss_steps = 0
 
-    for epoch in range(1, args.num_epochs + 1):
-        # Train
-        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
+    # Track training metrics for plotting
+    training_metrics = []
 
-        # Validate
-        val_loss = validate(model, val_loader, device)
+    model.train()
+    pbar = tqdm(total=args.max_steps, desc="Training")
 
-        # Step scheduler
-        scheduler.step()
+    # Infinite data loader (keep cycling through epochs until max_steps)
+    train_iter = iter(train_loader)
 
-        # Print epoch results
-        print(f"Epoch {epoch}/{args.num_epochs}")
-        print(f"  Train Loss: {train_loss:.4f}")
-        print(f"  Val Loss:   {val_loss:.4f}")
-        print(f"  LR:         {optimizer.param_groups[0]['lr']:.6f}")
+    while global_step < args.max_steps:
+        try:
+            images, text_tokens = next(train_iter)
+        except StopIteration:
+            # Restart data loader for new epoch
+            train_iter = iter(train_loader)
+            images, text_tokens = next(train_iter)
 
-        # Save checkpoint
-        if epoch % args.save_freq == 0 or epoch == args.num_epochs:
-            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_epoch{epoch}.pt')
+        images = images.to(device)
+        text_tokens = text_tokens.to(device)
+
+        optimizer.zero_grad()
+
+        # Forward pass with mixed precision
+        with autocast():
+            image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
+            loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
+
+        # Backward pass
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        # Track loss
+        running_loss += loss.item()
+        num_loss_steps += 1
+        global_step += 1
+
+        # Update progress bar
+        pbar.update(1)
+        pbar.set_postfix({'loss': loss.item(), 'step': global_step})
+
+        # Validate every N steps (PLIP strategy: catch overfitting early, select best model)
+        if global_step % args.val_steps == 0:
+            avg_train_loss = running_loss / num_loss_steps
+            val_loss = validate(model, val_loader, device)
+            print(f"\n  Step {global_step}/{args.max_steps}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}")
+
+            # Log metrics for plotting
+            training_metrics.append({
+                'step': global_step,
+                'train_loss': avg_train_loss,
+                'val_loss': val_loss
+            })
+
+            # Reset running loss
+            running_loss = 0
+            num_loss_steps = 0
+
+            # Save best model based on validation loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
+                torch.save({
+                    'step': global_step,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_loss': val_loss,
+                    'args': args
+                }, best_checkpoint_path)
+                print(f"  ✓ New best model saved (val_loss: {val_loss:.4f})")
+
+            model.train()  # Back to training mode
+
+        # Save checkpoint every N steps (PLIP strategy)
+        if global_step % args.save_steps == 0:
+            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_step{global_step}.pt')
             torch.save({
-                'epoch': epoch,
+                'step': global_step,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
                 'args': args
             }, checkpoint_path)
             print(f"  Saved checkpoint: {checkpoint_path}")
 
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'args': args
-            }, best_checkpoint_path)
-            print(f"  Saved best model: {best_checkpoint_path}")
+    pbar.close()
 
-        print()
+    # Save training metrics to CSV for plotting
+    metrics_df = pd.DataFrame(training_metrics)
+    metrics_csv_path = os.path.join(args.checkpoint_dir, 'training_metrics.csv')
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    print(f"\nTraining metrics saved to: {metrics_csv_path}")
 
-    print("Training complete!")
+    print("\nTraining complete!")
+    print(f"Total steps: {global_step}")
     print(f"Best validation loss: {best_val_loss:.4f}")
 
 
