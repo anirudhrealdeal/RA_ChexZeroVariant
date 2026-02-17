@@ -24,6 +24,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch.cuda.amp import autocast, GradScaler
 from torchvision.transforms import Compose, Resize, RandomResizedCrop, RandomHorizontalFlip, Normalize, InterpolationMode
 import h5py
@@ -396,20 +399,21 @@ def contrastive_loss(image_embeddings, text_embeddings, logit_scale):
 
 
 @torch.no_grad()
-def validate(model, dataloader, device):
+def validate(model, dataloader, device, verbose=True):
     """Validate model"""
     model.eval()
 
     total_loss = 0
     num_batches = 0
 
-    for images, text_tokens in tqdm(dataloader, desc="Validating"):
+    for images, text_tokens in tqdm(dataloader, desc="Validating", disable=not verbose):
         images = images.to(device)
         text_tokens = text_tokens.to(device)
 
         # Forward pass
-        image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
-        loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
+        with torch.no_grad():
+            image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
+            loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
 
         total_loss += loss.item()
         num_batches += 1
@@ -418,7 +422,36 @@ def validate(model, dataloader, device):
     return avg_loss
 
 
+def setup_distributed():
+    """Initialize distributed training"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        # Single GPU mode
+        rank = 0
+        world_size = 1
+        local_rank = 0
+
+    if world_size > 1:
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+
+    return rank, world_size, local_rank
+
+
+def cleanup_distributed():
+    """Clean up distributed training"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def main():
+    # Setup distributed training
+    rank, world_size, local_rank = setup_distributed()
+    is_main_process = (rank == 0)
+
     parser = argparse.ArgumentParser(
         description='Train PLIP-style model on CXR data',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -482,28 +515,57 @@ def main():
         args.val_csv = os.path.join(args.data_dir, 'chexpert_plus_valid.csv')
 
     # Create checkpoint directory
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    if is_main_process:
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Set device
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    if world_size > 1:
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+
+    if is_main_process:
+        print(f"Using device: {device}")
+        print(f"World size: {world_size} GPUs")
 
     # Initialize tokenizer
-    print("Loading tokenizer...")
+    if is_main_process:
+        print("Loading tokenizer...")
     tokenizer = SimpleTokenizer()
 
     # Create datasets
-    print(f"\nLoading training data from {args.train_h5}...")
+    if is_main_process:
+        print(f"\nLoading training data from {args.train_h5}...")
     train_dataset = CXRDataset(args.train_h5, args.train_csv, tokenizer, is_training=True)
 
-    print(f"\nLoading validation data from {args.val_h5}...")
+    if is_main_process:
+        print(f"\nLoading validation data from {args.val_h5}...")
     val_dataset = CXRDataset(args.val_h5, args.val_csv, tokenizer, is_training=False)
+
+    # Create distributed samplers for multi-GPU training
+    if world_size > 1:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False
+        )
+    else:
+        train_sampler = None
+        val_sampler = None
 
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=True
     )
@@ -512,20 +574,27 @@ def main():
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=args.num_workers,
         pin_memory=True
     )
 
     # Initialize model
-    print("\nInitializing model...")
+    if is_main_process:
+        print("\nInitializing model...")
     model = PLIPModel(embed_dim=args.embed_dim, temperature=args.temperature)
     model = model.to(device)
+
+    # Wrap model with DDP for multi-GPU training
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    if is_main_process:
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
 
     # Initialize optimizer (CheXzero uses SGD with momentum)
     if args.optimizer == 'sgd':
@@ -546,11 +615,13 @@ def main():
     scaler = GradScaler()
 
     # Training loop - PLIP strategy: step-based (not epoch-based), validate frequently
-    print(f"\nStarting training for {args.max_steps} steps (PLIP strategy: step-based, frequent validation)...")
-    print(f"  Dataset size: {len(train_dataset)} samples")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Steps per epoch: ~{len(train_loader)}")
-    print(f"  Estimated epochs: ~{args.max_steps / len(train_loader):.2f}")
+    if is_main_process:
+        print(f"\nStarting training for {args.max_steps} steps (PLIP strategy: step-based, frequent validation)...")
+        print(f"  Dataset size: {len(train_dataset)} samples")
+        print(f"  Batch size: {args.batch_size} per GPU")
+        print(f"  Effective batch size: {args.batch_size * world_size}")
+        print(f"  Steps per epoch: ~{len(train_loader)}")
+        print(f"  Estimated epochs: ~{args.max_steps / len(train_loader):.2f}")
 
     best_val_loss = float('inf')
     global_step = 0
@@ -561,7 +632,7 @@ def main():
     training_metrics = []
 
     model.train()
-    pbar = tqdm(total=args.max_steps, desc="Training")
+    pbar = tqdm(total=args.max_steps, desc="Training", disable=not is_main_process)
 
     # Infinite data loader (keep cycling through epochs until max_steps)
     train_iter = iter(train_loader)
@@ -600,28 +671,36 @@ def main():
 
         # Validate every N steps (PLIP strategy: catch overfitting early, select best model)
         if global_step % args.val_steps == 0:
-            avg_train_loss = running_loss / num_loss_steps
-            val_loss = validate(model, val_loader, device)
-            print(f"\n  Step {global_step}/{args.max_steps}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}")
+            # Synchronize all processes before validation
+            if world_size > 1:
+                dist.barrier()
 
-            # Log metrics for plotting
-            training_metrics.append({
-                'step': global_step,
-                'train_loss': avg_train_loss,
-                'val_loss': val_loss
-            })
+            avg_train_loss = running_loss / num_loss_steps
+            val_loss = validate(model, val_loader, device, verbose=is_main_process)
+
+            if is_main_process:
+                print(f"\n  Step {global_step}/{args.max_steps}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}")
+
+                # Log metrics for plotting
+                training_metrics.append({
+                    'step': global_step,
+                    'train_loss': avg_train_loss,
+                    'val_loss': val_loss
+                })
 
             # Reset running loss
             running_loss = 0
             num_loss_steps = 0
 
-            # Save best model based on validation loss
-            if val_loss < best_val_loss:
+            # Save best model based on validation loss (only on main process)
+            if is_main_process and val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
+                # Extract model state dict (unwrap DDP if needed)
+                model_state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                 torch.save({
                     'step': global_step,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': model_state_dict,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': val_loss,
                     'args': args
@@ -630,12 +709,14 @@ def main():
 
             model.train()  # Back to training mode
 
-        # Save checkpoint every N steps (PLIP strategy)
-        if global_step % args.save_steps == 0:
+        # Save checkpoint every N steps (PLIP strategy, only on main process)
+        if global_step % args.save_steps == 0 and is_main_process:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_step{global_step}.pt')
+            # Extract model state dict (unwrap DDP if needed)
+            model_state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
             torch.save({
                 'step': global_step,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': model_state_dict,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'args': args
             }, checkpoint_path)
@@ -643,15 +724,19 @@ def main():
 
     pbar.close()
 
-    # Save training metrics to CSV for plotting
-    metrics_df = pd.DataFrame(training_metrics)
-    metrics_csv_path = os.path.join(args.checkpoint_dir, 'training_metrics.csv')
-    metrics_df.to_csv(metrics_csv_path, index=False)
-    print(f"\nTraining metrics saved to: {metrics_csv_path}")
+    # Save training metrics to CSV for plotting (only on main process)
+    if is_main_process:
+        metrics_df = pd.DataFrame(training_metrics)
+        metrics_csv_path = os.path.join(args.checkpoint_dir, 'training_metrics.csv')
+        metrics_df.to_csv(metrics_csv_path, index=False)
+        print(f"\nTraining metrics saved to: {metrics_csv_path}")
 
-    print("\nTraining complete!")
-    print(f"Total steps: {global_step}")
-    print(f"Best validation loss: {best_val_loss:.4f}")
+        print("\nTraining complete!")
+        print(f"Total steps: {global_step}")
+        print(f"Best validation loss: {best_val_loss:.4f}")
+
+    # Cleanup distributed training
+    cleanup_distributed()
 
 
 if __name__ == '__main__':

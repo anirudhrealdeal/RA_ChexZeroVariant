@@ -3,7 +3,7 @@
 #SBATCH --partition=ai
 #SBATCH --time=72:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=a100:1
+#SBATCH --gpus-per-node=a100:2
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=160GB
 #SBATCH --output=logs/train-%j.out
@@ -47,7 +47,8 @@ echo "  - Batch size: 64 (CheXzero paper best model)"
 echo "  - Total steps: 25,000 (PLIP strategy)"
 echo "  - Validation/Save: Every 500 steps"
 
-python3 train_plip.py \
+# Launch with torchrun for distributed training on 2 GPUs
+torchrun --standalone --nproc_per_node=2 train_plip.py \
     --data_dir ../metadata \
     --checkpoint_dir checkpoints \
     --batch_size 64 \
