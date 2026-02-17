@@ -14,11 +14,11 @@ module purge
 module load python/3.11
 module load cuda/12.2
 
-# Activate virtual environment
-source ~/RA_ChexZeroVariant/venv/bin/activate
-
 # Navigate to project directory
 cd ~/RA_ChexZeroVariant/final
+
+# Install dependencies to user directory (if not already installed)
+pip install --user -q torch torchvision numpy pandas h5py scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
 
 # Create logs and checkpoints directories
 mkdir -p logs checkpoints
