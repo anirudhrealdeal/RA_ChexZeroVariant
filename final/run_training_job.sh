@@ -17,9 +17,11 @@ module load cuda/12.2
 # Navigate to project directory
 cd ~/RA_ChexZeroVariant/final
 
-# Uninstall incompatible h5py/numpy and reinstall with compatible precompiled versions
-pip uninstall -y h5py numpy 2>/dev/null || true
-pip install --user -q numpy h5py torch torchvision pandas scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
+# Install dependencies to user directory (ensuring compatible versions)
+pip install --user -q --upgrade numpy h5py torch torchvision pandas scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
+
+# Prioritize user packages over system packages to avoid binary incompatibility
+export PYTHONPATH=~/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Create logs and checkpoints directories
 mkdir -p logs checkpoints
