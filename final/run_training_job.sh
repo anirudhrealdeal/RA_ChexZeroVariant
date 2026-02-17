@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_plip
 #SBATCH --partition=ai
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=a100:1
 #SBATCH --cpus-per-gpu=8
