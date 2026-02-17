@@ -170,10 +170,30 @@ class PLIPModel(nn.Module):
         self.temperature = nn.Parameter(torch.ones([]) * temperature)
 
         # Load pretrained DINOv3 vision encoder (ViT-B/16)
-        # Pretrained on ImageNet with self-supervised learning
+        # Pretrained on large-scale web data (LVD-1689M dataset)
         # Expects 224x224 input, outputs 768-dim features
-        print("Loading pretrained DINOv3 ViT-B/16 (expects 224x224 input)...")
-        self.vision_encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb16')
+        print("Loading pretrained DINOv3 ViT-B/16 from local checkpoint...")
+        import timm
+
+        # Create DINOv3 ViT-B/16 architecture (without pretrained weights)
+        self.vision_encoder = timm.create_model('vit_base_patch16_dinov3', pretrained=False)
+
+        # Load checkpoint from local file
+        checkpoint_path = os.path.join(os.path.dirname(__file__), '..', 'encoders',
+                                       'dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        # Load state dict into model
+        missing_keys, unexpected_keys = self.vision_encoder.load_state_dict(checkpoint, strict=False)
+        if missing_keys:
+            print(f"   Warning: Missing keys: {len(missing_keys)} keys")
+        if unexpected_keys:
+            print(f"   Warning: Unexpected keys: {len(unexpected_keys)} keys")
+        print(f"   ✓ DINOv3 ViT-B/16 loaded from: {checkpoint_path}")
+
+        # Freeze the vision encoder (using pretrained features only)
+        for param in self.vision_encoder.parameters():
+            param.requires_grad = False
 
         # DINOv3 ViT-B/16 outputs 768-dim features
         vision_width = 768
@@ -182,10 +202,45 @@ class PLIPModel(nn.Module):
         # This "bridge" layer aligns DINOv3 features to CLIP's text latent space
         self.vision_projection = nn.Linear(vision_width, embed_dim)
 
-        # Load CLIP text encoder (ViT-B/32)
-        # This is the same text encoder used in CheXzero
-        print("Loading pretrained CLIP ViT-B/32 text encoder...")
+        # Load CheXzero's medically fine-tuned text encoder (ViT-B/32)
+        # This text encoder was fine-tuned on CXR reports for medical language understanding
+        print("Loading CheXzero's medically fine-tuned text encoder (ViT-B/32)...")
+
+        # First load base CLIP architecture
         clip_model, _ = load_clip("ViT-B/32", device="cpu", jit=False)
+
+        # Load CheXzero checkpoint with medical fine-tuning
+        # Try both possible filenames (with and without step/metric suffix)
+        chexzero_dir = os.path.expanduser("~/.cache/chexzero")
+        possible_names = [
+            "best_64_5e-05_original_22000_0.864.pt",
+            "best_64_5e-05_original.pt"
+        ]
+
+        chexzero_path = None
+        for name in possible_names:
+            path = os.path.join(chexzero_dir, name)
+            if os.path.exists(path):
+                chexzero_path = path
+                break
+
+        if chexzero_path is None:
+            raise FileNotFoundError(
+                f"CheXzero weights not found in {chexzero_dir}\n"
+                f"Please download from Google Drive: https://drive.google.com/drive/folders/1makFLiEMbSleYltaRxw81aBhEDMpVwno\n"
+                f"Save as: {os.path.join(chexzero_dir, possible_names[0])}"
+            )
+
+        print(f"Loading CheXzero weights from: {chexzero_path}")
+
+        chexzero_checkpoint = torch.load(chexzero_path, map_location="cpu")
+
+        # Extract text encoder weights from CheXzero checkpoint
+        # CheXzero saves weights with 'model.' or 'module.model.' prefix
+        state_dict = chexzero_checkpoint.get('model_state_dict', chexzero_checkpoint)
+
+        # Load CheXzero's fine-tuned text encoder weights into CLIP model
+        self._load_chexzero_text_weights(clip_model, state_dict)
 
         self.token_embedding = clip_model.token_embedding
         self.positional_embedding = clip_model.positional_embedding
@@ -193,11 +248,49 @@ class PLIPModel(nn.Module):
         self.ln_final = clip_model.ln_final
         self.text_projection_clip = clip_model.text_projection
 
-        # CLIP text encoder outputs 512-dim features (matches our shared embedding space)
+        # Freeze text encoder (using CheXzero's fine-tuned weights as-is)
+        for param in [self.token_embedding.parameters(),
+                      self.transformer.parameters(),
+                      self.ln_final.parameters()]:
+            for p in param:
+                p.requires_grad = False
+
+        print("✓ CheXzero text encoder loaded successfully")
+
+        # Text encoder outputs 512-dim features (matches our shared embedding space)
         # No additional projection needed since embed_dim=512
 
         # Learnable logit scale (like CLIP)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    def _load_chexzero_text_weights(self, clip_model, state_dict):
+        """
+        Load CheXzero's fine-tuned text encoder weights into CLIP model.
+
+        CheXzero checkpoint may have keys with prefixes like:
+        - 'model.transformer.resblocks.0.attn.in_proj_weight'
+        - 'module.model.transformer.resblocks.0.attn.in_proj_weight'
+
+        We need to strip prefixes and load into the base CLIP model.
+        """
+        # Extract text encoder keys and strip prefixes
+        text_encoder_state = {}
+
+        for key, value in state_dict.items():
+            # Remove 'module.' or 'model.' prefixes if present
+            clean_key = key.replace('module.model.', '').replace('model.', '').replace('module.', '')
+
+            # Only load text encoder components (exclude vision encoder)
+            text_components = ['token_embedding', 'positional_embedding', 'transformer',
+                              'ln_final', 'text_projection']
+
+            if any(comp in clean_key for comp in text_components):
+                text_encoder_state[clean_key] = value
+
+        # Load weights into CLIP model (only text encoder parts)
+        clip_model.load_state_dict(text_encoder_state, strict=False)
+
+        print(f"   Loaded {len(text_encoder_state)} text encoder parameters from CheXzero")
 
     def encode_image(self, images):
         """
@@ -209,8 +302,14 @@ class PLIPModel(nn.Module):
         Returns:
             (B, 512) normalized embeddings
         """
-        # DINOv3 ViT-B/16 encoding (pretrained on ImageNet with self-supervised learning)
-        features = self.vision_encoder(images)  # (B, 768)
+        # DINOv3 ViT-B/16 encoding (pretrained on large-scale web data)
+        # timm's forward_features returns: (B, num_tokens, 768)
+        # where num_tokens = 1 (CLS) + 196 (14x14 patches) + 4 (register tokens) = 201
+        features_all = self.vision_encoder.forward_features(images)
+
+        # Extract CLS token embedding (first token)
+        # Shape: (B, 201, 768) -> take [:, 0, :] -> (B, 768)
+        features = features_all[:, 0, :]  # (B, 768)
 
         # Simple linear projection to CLIP's 512-dim latent space
         embeddings = self.vision_projection(features)  # (B, 512)
