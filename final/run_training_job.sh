@@ -17,11 +17,21 @@ module load cuda/12.2
 # Navigate to project directory
 cd ~/RA_ChexZeroVariant/final
 
-# Install dependencies with stable precompiled versions (no compilation needed)
-pip install --user -q --only-binary :all: numpy h5py torch torchvision pandas scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow 2>/dev/null || \
-pip install --user -q 'numpy<2.0' 'h5py>=3.10,<4.0' 'pandas<3.0' torch torchvision scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
+# Install exact versions from requirements.txt (known to work with precompiled wheels)
+pip install --user -q \
+    numpy==1.24.3 \
+    h5py==3.8.0 \
+    pandas==1.5.3 \
+    Pillow==9.5.0 \
+    scikit-learn==1.2.2 \
+    matplotlib==3.7.1 \
+    tqdm==4.65.0 \
+    ftfy==6.1.1 \
+    regex==2023.3.23 \
+    torch torchvision \
+    timm transformers accelerate
 
-# Prioritize user packages over system packages to avoid binary incompatibility
+# Prioritize user packages over system packages
 export PYTHONPATH=~/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Create logs and checkpoints directories
