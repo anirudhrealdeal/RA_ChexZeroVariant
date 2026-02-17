@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=a100:1
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=160G
+#SBATCH --mem-per-gpu=160GB
 #SBATCH --output=logs/train-%j.out
 #SBATCH --error=logs/train-%j.err
 
@@ -17,8 +17,11 @@ module load cuda/12.2
 # Navigate to project directory
 cd ~/RA_ChexZeroVariant/final
 
-# Install dependencies to user directory (if not already installed)
-pip install --user -q torch torchvision numpy pandas h5py scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
+# Install dependencies to user directory with compatible versions
+pip install --user -q --upgrade pip
+pip install --user -q numpy
+pip install --user -q --force-reinstall --no-binary h5py h5py
+pip install --user -q torch torchvision pandas scikit-learn matplotlib tqdm timm transformers accelerate ftfy regex Pillow
 
 # Create logs and checkpoints directories
 mkdir -p logs checkpoints
