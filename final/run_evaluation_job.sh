@@ -66,6 +66,8 @@ echo ""
 # Step 3: Generate plots
 echo "Step 3: Generating result plots..."
 echo "------------------------------------------------"
+# Install seaborn if not present
+pip install --user -q seaborn
 python3 plot_results.py \
     --checkpoint_dir checkpoints \
     --output_dir results/plots

@@ -15,6 +15,9 @@ module load python/3.11
 # Navigate to project directory
 cd ~/RA_ChexZeroVariant/final
 
+# Install seaborn if not present
+pip install --user -q seaborn
+
 # Prioritize user packages over system packages
 export PYTHONPATH=~/.local/lib/python3.11/site-packages:$PYTHONPATH
 
