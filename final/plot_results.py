@@ -178,14 +178,16 @@ def plot_individual_aurocs(auroc_csv, best_step, output_path):
     plt.close()
 
 
-def generate_summary_report(metrics_csv, auroc_csv, best_checkpoint_json, output_path):
+def generate_summary_report(metrics_csv, auroc_csv, best_step, best_checkpoint, mean_auroc, output_path):
     """
     Generate a text summary report of training results.
 
     Args:
         metrics_csv: Path to training_metrics.csv
         auroc_csv: Path to checkpoint_auroc_results.csv
-        best_checkpoint_json: Path to best_checkpoint_info.json
+        best_step: Step number of best checkpoint
+        best_checkpoint: Filename of best checkpoint
+        mean_auroc: Mean AUROC of best checkpoint
         output_path: Where to save the report
     """
     print(f"\nGenerating summary report...")
@@ -193,13 +195,6 @@ def generate_summary_report(metrics_csv, auroc_csv, best_checkpoint_json, output
     # Load data
     metrics_df = pd.read_csv(metrics_csv)
     auroc_df = pd.read_csv(auroc_csv)
-
-    with open(best_checkpoint_json, 'r') as f:
-        best_info = json.load(f)
-
-    best_step = best_info['best_step']
-    best_checkpoint = best_info['best_checkpoint']
-    mean_auroc = best_info['mean_auroc']
 
     best_row = auroc_df[auroc_df['step'] == best_step].iloc[0]
 
@@ -300,7 +295,6 @@ def main():
     # File paths
     metrics_csv = os.path.join(args.checkpoint_dir, 'training_metrics.csv')
     auroc_csv = 'checkpoint_auroc_results.csv'  # In current directory
-    best_json = 'best_checkpoint_info.json'  # In current directory
 
     # Check files exist
     missing_files = []
@@ -308,8 +302,6 @@ def main():
         missing_files.append(metrics_csv)
     if not os.path.exists(auroc_csv):
         missing_files.append(auroc_csv)
-    if not os.path.exists(best_json):
-        missing_files.append(best_json)
 
     if missing_files:
         print("ERROR: Missing required files:")
@@ -317,20 +309,23 @@ def main():
             print(f"  - {f}")
         print("\nMake sure you have:")
         print("  1. Completed training (generates training_metrics.csv)")
-        print("  2. Run evaluate_checkpoints.py (generates checkpoint_auroc_results.csv and best_checkpoint_info.json)")
+        print("  2. Run evaluate_checkpoints.py (generates checkpoint_auroc_results.csv)")
         sys.exit(1)
 
-    # Load best checkpoint info
-    with open(best_json, 'r') as f:
-        best_info = json.load(f)
-
-    best_step = best_info['best_step']
+    # Find best checkpoint from AUROC results (highest mean AUROC)
+    auroc_df = pd.read_csv(auroc_csv)
+    best_idx = auroc_df['mean_auroc'].idxmax()
+    best_row = auroc_df.loc[best_idx]
+    best_step = int(best_row['step'])
+    mean_auroc = float(best_row['mean_auroc'])
+    best_checkpoint = f'checkpoint_step{best_step}.pt'
 
     print("="*70)
     print("GENERATING TRAINING RESULT PLOTS")
     print("="*70)
     print(f"Output directory: {args.output_dir}")
-    print(f"Best checkpoint: Step {best_step}")
+    print(f"Best checkpoint: {best_checkpoint} (Step {best_step})")
+    print(f"Best Mean AUROC: {mean_auroc:.4f}")
     print()
 
     # Generate plots
@@ -354,7 +349,9 @@ def main():
     generate_summary_report(
         metrics_csv,
         auroc_csv,
-        best_json,
+        best_step,
+        best_checkpoint,
+        mean_auroc,
         os.path.join(args.output_dir, 'training_summary.txt')
     )
 
