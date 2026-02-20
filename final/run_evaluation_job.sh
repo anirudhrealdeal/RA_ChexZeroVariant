@@ -44,13 +44,15 @@ echo ""
 echo "✓ Evaluation complete!"
 echo ""
 
-# Step 2: Compute bootstrap confidence intervals
+# Step 2: Compute bootstrap confidence intervals for best model
 echo "Step 2: Computing bootstrap 95% confidence intervals..."
 echo "------------------------------------------------"
+echo "Using best model from training (best validation loss)"
 python3 compute_bootstrap_ci.py \
-    --results_path results/checkpoint_auroc_results.csv \
-    --output_path results/bootstrap_ci.csv \
-    --n_bootstrap 1000
+    --checkpoint checkpoints/best_model.pt \
+    --data_dir ../metadata \
+    --n_bootstrap 1000 \
+    --output_csv results/bootstrap_ci.csv
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Bootstrap CI computation failed!"
@@ -65,8 +67,7 @@ echo ""
 echo "Step 3: Generating result plots..."
 echo "------------------------------------------------"
 python3 plot_results.py \
-    --results_path results/checkpoint_auroc_results.csv \
-    --bootstrap_path results/bootstrap_ci.csv \
+    --checkpoint_dir checkpoints \
     --output_dir results/plots
 
 if [ $? -ne 0 ]; then
