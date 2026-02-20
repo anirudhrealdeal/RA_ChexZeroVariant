@@ -24,6 +24,10 @@ export PYTHONPATH=~/.local/lib/python3.11/site-packages:$PYTHONPATH
 echo "Starting plotting at $(date)"
 echo "================================================"
 
+# Create symlinks for files plot_results.py expects in current directory
+ln -sf results/checkpoint_auroc_results.csv checkpoint_auroc_results.csv 2>/dev/null || true
+ln -sf results/best_checkpoint_info.json best_checkpoint_info.json 2>/dev/null || true
+
 # Generate plots from training and evaluation results
 python3 plot_results.py \
     --checkpoint_dir checkpoints \
