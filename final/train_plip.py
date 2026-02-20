@@ -191,9 +191,10 @@ class PLIPModel(nn.Module):
             print(f"   Warning: Unexpected keys: {len(unexpected_keys)} keys")
         print(f"   ✓ DINOv3 ViT-B/16 loaded from: {checkpoint_path}")
 
-        # Freeze the vision encoder (using pretrained features only)
-        for param in self.vision_encoder.parameters():
-            param.requires_grad = False
+        # DON'T freeze vision encoder - allow fine-tuning for better performance
+        # (Original code froze it, but this prevents learning)
+        # for param in self.vision_encoder.parameters():
+        #     param.requires_grad = False
 
         # DINOv3 ViT-B/16 outputs 768-dim features
         vision_width = 768
@@ -248,12 +249,13 @@ class PLIPModel(nn.Module):
         self.ln_final = clip_model.ln_final
         self.text_projection_clip = clip_model.text_projection
 
-        # Freeze text encoder (using CheXzero's fine-tuned weights as-is)
-        for param in [self.token_embedding.parameters(),
-                      self.transformer.parameters(),
-                      self.ln_final.parameters()]:
-            for p in param:
-                p.requires_grad = False
+        # DON'T freeze text encoder - allow fine-tuning to adapt to medical domain
+        # (Original code froze it, but CheXzero paper shows full fine-tuning works best)
+        # for param in [self.token_embedding.parameters(),
+        #               self.transformer.parameters(),
+        #               self.ln_final.parameters()]:
+        #     for p in param:
+        #         p.requires_grad = False
 
         print("✓ CheXzero text encoder loaded successfully")
 
