@@ -194,7 +194,7 @@ def run_inference_and_bootstrap(checkpoint_path, val_loader, tokenizer, device, 
 
     # Load checkpoint
     print("Loading checkpoint...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # Load model
     model = PLIPModel(embed_dim=512)
@@ -244,7 +244,7 @@ def main():
                         help='Number of bootstrap iterations')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Batch size for inference')
-    parser.add_argument('--num_workers', type=int, default=8,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of dataloader workers')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device (cuda or cpu)')
