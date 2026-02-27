@@ -21,7 +21,7 @@ cd ~/RA_ChexZeroVariant/final
 export PYTHONPATH=~/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Create results directory
-mkdir -p results
+mkdir -p results_2
 
 echo "Starting evaluation at $(date)"
 echo "================================================"
@@ -33,7 +33,7 @@ echo "------------------------------------------------"
 python3 evaluate_checkpoints_fixed.py \
     --checkpoint_dir checkpoints \
     --data_dir ../metadata \
-    --output_csv results/checkpoint_auroc_results.csv
+    --output_csv checkpoint_auroc_results.csv
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Evaluation failed!"
@@ -52,7 +52,7 @@ python3 compute_bootstrap_ci.py \
     --checkpoint checkpoints/best_model.pt \
     --data_dir ../metadata \
     --n_bootstrap 1000 \
-    --output_csv results/bootstrap_ci.csv
+    --output_csv results_2/bootstrap_ci.csv
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Bootstrap CI computation failed!"
@@ -70,7 +70,7 @@ echo "------------------------------------------------"
 pip install --user -q seaborn
 python3 plot_results.py \
     --checkpoint_dir checkpoints \
-    --output_dir results/plots
+    --output_dir results_2/plots
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Plot generation failed!"
@@ -84,12 +84,12 @@ echo "================================================"
 echo "All evaluation steps completed at $(date)"
 echo ""
 echo "Results saved to:"
-echo "  - results/checkpoint_auroc_results.csv (AUROC per checkpoint per pathology)"
-echo "  - results/bootstrap_ci.csv (95% confidence intervals)"
-echo "  - results/plots/ (visualizations)"
+echo "  - checkpoint_auroc_results.csv (AUROC per checkpoint per pathology)"
+echo "  - results_2/bootstrap_ci.csv (95% confidence intervals)"
+echo "  - results_2/plots/ (visualizations)"
 echo ""
 echo "To view results:"
-echo "  cat results/checkpoint_auroc_results.csv"
-echo "  cat results/bootstrap_ci.csv"
+echo "  cat checkpoint_auroc_results.csv"
+echo "  cat results_2/bootstrap_ci.csv"
 echo ""
 echo "Best checkpoint will be identified by highest Mean AUROC"
