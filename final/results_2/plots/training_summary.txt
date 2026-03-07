@@ -1,0 +1,53 @@
+======================================================================
+TRAINING RESULTS SUMMARY
+======================================================================
+
+## Training Configuration
+  Total training steps: 25000
+  Validation frequency: 500 steps
+  Number of checkpoints evaluated: 50
+
+## Best Checkpoint Selection
+  Selection criterion: Highest Mean AUROC on validation set
+  Best checkpoint: checkpoint_step5000.pt
+  Step: 5000
+  Mean AUROC: 0.5534
+
+  Training loss at best step: 4.1600
+  Validation loss at best step: 4.0546
+
+## Individual Pathology AUROCs at Best Checkpoint
+
+  Pathology                                AUROC
+  ----------------------------------- ----------
+  Pneumonia                               0.7946
+  Fracture                                0.6433
+  Edema                                   0.5826
+  Atelectasis                             0.5819
+  Pleural Other                           0.5687
+  Enlarged Cardiomediastinum              0.5581
+  Support Devices                         0.5458
+  Consolidation                           0.5422
+  Lung Lesion                             0.5256
+  Pleural Effusion                        0.5182
+  Lung Opacity                            0.5088
+  No Finding                              0.5017
+  Pneumothorax                            0.4556
+  Cardiomegaly                            0.4207
+
+  Mean AUROC                              0.5534
+
+## Why This Checkpoint Was Selected
+
+  The checkpoint at step 5000 was selected because it achieved
+  the highest Mean AUROC (0.5534) on the CheXpert validation
+  set across all 14 pathologies, using the Positive-Negative Similarity
+  (PNS) zero-shot evaluation strategy from the CheXzero paper.
+
+  Note: The best checkpoint (step 5000, AUROC 0.5534)
+  outperforms the final checkpoint (step 25000, AUROC 0.4697),
+  indicating that validation AUROC peaked earlier in training.
+  This validates the importance of checkpoint selection by AUROC
+  rather than training loss alone.
+
+======================================================================
