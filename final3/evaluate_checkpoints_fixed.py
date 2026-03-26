@@ -384,11 +384,11 @@ def main():
     print(f"Validation set: {len(val_dataset)} samples\n")
 
     # Find all checkpoints
-    checkpoint_paths = sorted(glob.glob(os.path.join(args.checkpoint_dir, 'checkpoint_step*.pt')))
+    checkpoint_paths = sorted(glob.glob(os.path.join(args.checkpoint_dir, 'checkpoint_batch*.pt')))
 
     if len(checkpoint_paths) == 0:
         print(f"ERROR: No checkpoints found in {args.checkpoint_dir}")
-        print("       Looking for files matching: checkpoint_step*.pt")
+        print("       Looking for files matching: checkpoint_batch*.pt")
         sys.exit(1)
 
     print(f"Found {len(checkpoint_paths)} checkpoints\n")
@@ -398,12 +398,12 @@ def main():
     results = []
 
     for ckpt_path in checkpoint_paths:
-        # Extract step number from filename
+        # Extract batch number from filename
         basename = os.path.basename(ckpt_path)
         try:
-            step = int(basename.split('step')[1].split('.pt')[0])
+            batch = int(basename.split('batch')[1].split('.pt')[0])
         except:
-            print(f"Warning: Could not parse step number from {basename}, skipping")
+            print(f"Warning: Could not parse batch number from {basename}, skipping")
             continue
 
         # Evaluate
@@ -411,7 +411,7 @@ def main():
 
         # Store results
         result = {
-            'step': step,
+            'batch': batch,
             'checkpoint': ckpt_path,
             'mean_auroc': mean_auc
         }
@@ -422,14 +422,14 @@ def main():
 
         results.append(result)
 
-        print(f"  Step {step}: Mean AUROC = {mean_auc:.4f}")
+        print(f"  Batch {batch}: Mean AUROC = {mean_auc:.4f}")
         print("="*70)
 
     print("\n" + "="*70)
 
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('step')
+    results_df = results_df.sort_values('batch')
 
     # Save results
     results_df.to_csv(args.output_csv, index=False)
@@ -440,9 +440,9 @@ def main():
     best_row = results_df.iloc[best_idx]
 
     print("\n" + "="*70)
-    print("🏆 BEST CHECKPOINT (by Mean AUROC):")
+    print("BEST CHECKPOINT (by Mean AUROC):")
     print("="*70)
-    print(f"  Step:        {int(best_row['step'])}")
+    print(f"  Batch:       {int(best_row['batch'])}")
     print(f"  Mean AUROC:  {best_row['mean_auroc']:.4f}")
     print(f"  Path:        {best_row['checkpoint']}")
     print()
@@ -455,7 +455,7 @@ def main():
 
     # Save best checkpoint info
     best_info = {
-        'best_step': int(best_row['step']),
+        'best_batch': int(best_row['batch']),
         'best_checkpoint': best_row['checkpoint'],
         'mean_auroc': best_row['mean_auroc']
     }
