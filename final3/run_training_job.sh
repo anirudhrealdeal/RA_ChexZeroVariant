@@ -50,13 +50,14 @@ python3 train_plip.py \
     --data_dir ../metadata \
     --checkpoint_dir checkpoints \
     --batch_size 64 \
-    --max_steps 25000 \
+    --num_epochs 4 \
     --lr 1e-4 \
     --momentum 0.9 \
     --optimizer sgd \
     --embed_dim 512 \
     --num_workers 8 \
-    --save_steps 500 \
-    --val_steps 500
+    --save_interval 100 \
+    --log_interval 10 \
+    --val_interval 500
 
 echo "Finished training at $(date)"

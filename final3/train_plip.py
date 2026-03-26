@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-PLIP-Style Training: Pretrained DINOv3 ViT-B/16 + Pretrained CLIP Text Encoder
-Contrastive learning on CheXpert-Plus + ReXGradient datasets (462K image-text pairs)
+CheXzero-style Training: Standard CLIP ViT-B/32 (vision + text) fine-tuned end-to-end.
+Contrastive learning on CheXpert-Plus + ReXGradient datasets (462K image-text pairs).
 
-Training Strategy (following training_strategy.md):
-- Vision: Pretrained DINOv3 ViT-B/16 (expects 224x224, outputs 768-dim)
-- Text: Pretrained CLIP ViT-B/32 text encoder (outputs 512-dim)
-- Projection: Vision 768 → 512 (simple linear layer to match text space)
-- Shared embedding space: 512-dim (CLIP's latent space)
-- Images stored at 320x320 in HDF5, resized to 224x224 during training
+Research question: CheXzero trained on ~200K pairs → 0.864 AUROC.
+Does 2.3x more data (462K) improve performance with the same architecture?
+
+Architecture:
+- Vision: CLIP ViT-B/32 visual encoder (512-dim output, no projection needed)
+- Text:   CLIP ViT-B/32 text encoder (512-dim output)
+- Shared embedding space: 512-dim (CLIP's native jointly-pretrained space)
+- Both encoders fully trainable end-to-end (CheXzero approach)
+
+Training:
 - CheXzero hyperparameters: batch_size=64, lr=1e-4, SGD with momentum=0.9
 - PLIP strategy: 25,000 total steps, validate/save every 500 steps
 - Augmentations (train only): RandomResizedCrop(224, scale=0.9-1.0) + RandomHorizontalFlip
-- Normalization: CLIP stats (not ImageNet)
+- Normalization: CLIP stats
 
 Usage:
     python train_plip.py --data_dir metadata --checkpoint_dir checkpoints
@@ -63,27 +67,22 @@ class CXRDataset(Dataset):
         # With 8 workers, this reduces file opens from ~462k/epoch to just 8 total
         self._h5_file = None
 
-        # CLIP normalization statistics (from OpenAI CLIP weights)
-        # These are the stats the CLIP text encoder was trained with
-        clip_mean = [0.48145466, 0.4578275, 0.40821073]
-        clip_std = [0.26862954, 0.26130258, 0.27577711]
+        # CheXzero normalization statistics (CXR-specific, from original CheXzero repo)
+        # Original uses [0,255] range: mean=101.48761, std=83.43944
+        # Adjusted for our [0,1] pipeline (divided by 255)
+        cxr_mean = [101.48761 / 255.0] * 3
+        cxr_std  = [83.43944  / 255.0] * 3
 
-        # Training augmentations (following PLIP/medical CLIP best practices)
+        # Training: resize to model input resolution + normalize (CheXzero approach)
         if is_training:
             self.transform = Compose([
-                RandomResizedCrop(
-                    input_resolution,
-                    scale=(0.9, 1.0),  # Slight crop variation for robustness
-                    interpolation=InterpolationMode.BICUBIC
-                ),
-                RandomHorizontalFlip(p=0.5),  # Anatomically safe for chest X-rays
-                Normalize(mean=clip_mean, std=clip_std)
+                Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
+                Normalize(mean=cxr_mean, std=cxr_std)
             ])
         else:
-            # Validation: no augmentation, just resize and normalize
             self.transform = Compose([
                 Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
-                Normalize(mean=clip_mean, std=clip_std)
+                Normalize(mean=cxr_mean, std=cxr_std)
             ])
 
         # Load CSV metadata
@@ -325,11 +324,11 @@ def main():
     parser.add_argument('--temperature', type=float, default=0.07,
                         help='Initial temperature for contrastive loss')
 
-    # Training hyperparameters (from training_strategy.md + CheXzero paper)
+    # Training hyperparameters (CheXzero original)
     parser.add_argument('--batch_size', type=int, default=64,
-                        help='Batch size (CheXzero paper best model uses 64)')
-    parser.add_argument('--max_steps', type=int, default=25000,
-                        help='Total training steps (PLIP strategy, not epoch-based)')
+                        help='Batch size (CheXzero best model uses 64)')
+    parser.add_argument('--num_epochs', type=int, default=4,
+                        help='Number of training epochs (CheXzero uses 4)')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (CheXzero uses 1e-4)')
     parser.add_argument('--momentum', type=float, default=0.9,
@@ -338,13 +337,15 @@ def main():
                         choices=['sgd', 'adamw'],
                         help='Optimizer type (CheXzero uses SGD)')
 
-    # Output paths (PLIP strategy: save by steps)
+    # Output paths
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
-    parser.add_argument('--save_steps', type=int, default=500,
-                        help='Save checkpoint every N steps (PLIP: 500)')
-    parser.add_argument('--val_steps', type=int, default=500,
-                        help='Validate every N steps (PLIP: 500, select best model)')
+    parser.add_argument('--save_interval', type=int, default=100,
+                        help='Save checkpoint every N batches (CheXzero uses 100)')
+    parser.add_argument('--log_interval', type=int, default=10,
+                        help='Log loss every N batches (CheXzero uses 10)')
+    parser.add_argument('--val_interval', type=int, default=500,
+                        help='Validate every N batches')
 
     # System
     parser.add_argument('--num_workers', type=int, default=8,
@@ -428,103 +429,88 @@ def main():
     # Mixed precision scaler
     scaler = GradScaler()
 
-    # Training loop - PLIP strategy: step-based (not epoch-based), validate frequently
-    print(f"\nStarting training for {args.max_steps} steps (PLIP strategy: step-based, frequent validation)...")
+    # Training loop - CheXzero approach: epoch-based
+    print(f"\nStarting training for {args.num_epochs} epochs (CheXzero approach)...")
     print(f"  Dataset size: {len(train_dataset)} samples")
     print(f"  Batch size: {args.batch_size}")
-    print(f"  Steps per epoch: ~{len(train_loader)}")
-    print(f"  Estimated epochs: ~{args.max_steps / len(train_loader):.2f}")
+    print(f"  Batches per epoch: {len(train_loader)}")
+    print(f"  Total batches: {len(train_loader) * args.num_epochs}")
 
     best_val_loss = float('inf')
-    global_step = 0
-    running_loss = 0
-    num_loss_steps = 0
+    batch_ct = 0
+    running_loss = 0.0
 
     # Track training metrics for plotting
     training_metrics = []
 
-    model.train()
-    pbar = tqdm(total=args.max_steps, desc="Training")
+    for epoch in range(args.num_epochs):
+        model.train()
+        print(f"\n--- Epoch {epoch + 1}/{args.num_epochs} ---")
 
-    # Infinite data loader (keep cycling through epochs until max_steps)
-    train_iter = iter(train_loader)
+        for images, text_tokens in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+            images = images.to(device)
+            text_tokens = text_tokens.to(device)
 
-    while global_step < args.max_steps:
-        try:
-            images, text_tokens = next(train_iter)
-        except StopIteration:
-            # Restart data loader for new epoch
-            train_iter = iter(train_loader)
-            images, text_tokens = next(train_iter)
+            optimizer.zero_grad()
 
-        images = images.to(device)
-        text_tokens = text_tokens.to(device)
+            # Forward pass with mixed precision
+            with autocast():
+                image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
+                loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
 
-        optimizer.zero_grad()
+            # Backward pass
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-        # Forward pass with mixed precision
-        with autocast():
-            image_embeddings, text_embeddings, logit_scale = model(images, text_tokens)
-            loss = contrastive_loss(image_embeddings, text_embeddings, logit_scale)
+            running_loss += loss.item()
+            batch_ct += 1
 
-        # Backward pass
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+            # Log every N batches (CheXzero: every 10)
+            if batch_ct % args.log_interval == 0:
+                avg_loss = running_loss / args.log_interval
+                print(f"  Batch {batch_ct}: loss = {avg_loss:.4f}")
+                running_loss = 0.0
 
-        # Track loss
-        running_loss += loss.item()
-        num_loss_steps += 1
-        global_step += 1
+            # Validate every N batches
+            if batch_ct % args.val_interval == 0:
+                val_loss = validate(model, val_loader, device)
+                print(f"  [Batch {batch_ct}] Val Loss = {val_loss:.4f}")
 
-        # Update progress bar
-        pbar.update(1)
-        pbar.set_postfix({'loss': loss.item(), 'step': global_step})
+                training_metrics.append({
+                    'batch': batch_ct,
+                    'epoch': epoch + 1,
+                    'val_loss': val_loss
+                })
 
-        # Validate every N steps (PLIP strategy: catch overfitting early, select best model)
-        if global_step % args.val_steps == 0:
-            avg_train_loss = running_loss / num_loss_steps
-            val_loss = validate(model, val_loader, device)
-            print(f"\n  Step {global_step}/{args.max_steps}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}")
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
+                    torch.save({
+                        'epoch': epoch + 1,
+                        'batch': batch_ct,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'val_loss': val_loss,
+                        'args': args
+                    }, best_checkpoint_path)
+                    print(f"  ✓ New best model saved (val_loss: {val_loss:.4f})")
 
-            # Log metrics for plotting
-            training_metrics.append({
-                'step': global_step,
-                'train_loss': avg_train_loss,
-                'val_loss': val_loss
-            })
+                model.train()
 
-            # Reset running loss
-            running_loss = 0
-            num_loss_steps = 0
-
-            # Save best model based on validation loss
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
+            # Save checkpoint every N batches (CheXzero: every 100)
+            if batch_ct % args.save_interval == 0:
+                checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_batch{batch_ct}.pt')
                 torch.save({
-                    'step': global_step,
+                    'epoch': epoch + 1,
+                    'batch': batch_ct,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'val_loss': val_loss,
                     'args': args
-                }, best_checkpoint_path)
-                print(f"  ✓ New best model saved (val_loss: {val_loss:.4f})")
+                }, checkpoint_path)
+                print(f"  Saved checkpoint: {checkpoint_path}")
 
-            model.train()  # Back to training mode
-
-        # Save checkpoint every N steps (PLIP strategy)
-        if global_step % args.save_steps == 0:
-            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_step{global_step}.pt')
-            torch.save({
-                'step': global_step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'args': args
-            }, checkpoint_path)
-            print(f"  Saved checkpoint: {checkpoint_path}")
-
-    pbar.close()
+        print(f"  Epoch {epoch + 1} complete.")
 
     # Save training metrics to CSV for plotting
     metrics_df = pd.DataFrame(training_metrics)
@@ -533,7 +519,7 @@ def main():
     print(f"\nTraining metrics saved to: {metrics_csv_path}")
 
     print("\nTraining complete!")
-    print(f"Total steps: {global_step}")
+    print(f"Total batches: {batch_ct}")
     print(f"Best validation loss: {best_val_loss:.4f}")
 
 
