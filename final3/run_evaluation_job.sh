@@ -44,12 +44,11 @@ echo ""
 echo "✓ Evaluation complete!"
 echo ""
 
-# Step 2: Compute bootstrap confidence intervals for best model
+# Step 2: Compute bootstrap confidence intervals for best AUROC checkpoint
 echo "Step 2: Computing bootstrap 95% confidence intervals..."
 echo "------------------------------------------------"
-echo "Using best model from training (best validation loss)"
+echo "Using best checkpoint by AUROC (from best_checkpoint_info.json)"
 python3 compute_bootstrap_ci.py \
-    --checkpoint checkpoints/best_model.pt \
     --data_dir ../metadata \
     --n_bootstrap 1000 \
     --output_csv results_2/bootstrap_ci.csv

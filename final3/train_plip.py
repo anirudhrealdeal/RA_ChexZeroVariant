@@ -14,9 +14,8 @@ Architecture:
 
 Training:
 - CheXzero hyperparameters: batch_size=64, lr=1e-4, SGD with momentum=0.9
-- PLIP strategy: 25,000 total steps, validate/save every 500 steps
-- Augmentations (train only): RandomResizedCrop(224, scale=0.9-1.0) + RandomHorizontalFlip
-- Normalization: CLIP stats
+- Epoch-based: 4 epochs, save every 100 batches, log every 10 batches
+- Normalization: CXR-specific stats (mean=101.48761, std=83.43944), Normalize then Resize
 
 Usage:
     python train_plip.py --data_dir metadata --checkpoint_dir checkpoints
@@ -29,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast, GradScaler
-from torchvision.transforms import Compose, Resize, RandomResizedCrop, RandomHorizontalFlip, Normalize, InterpolationMode
+from torchvision.transforms import Compose, Resize, Normalize, InterpolationMode
 import h5py
 import pandas as pd
 import numpy as np
@@ -53,14 +52,13 @@ class CXRDataset(Dataset):
             csv_path: Path to CSV file with impressions
             tokenizer: Text tokenizer
             max_length: Maximum token length
-            input_resolution: Target resolution for model input (224 for pretrained DINOv3)
-            is_training: If True, applies training augmentations (RandomResizedCrop + Flip)
+            input_resolution: Target resolution for CLIP ViT-B/32 (224)
+            is_training: Unused — kept for API compatibility
         """
         self.h5_path = h5_path
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.input_resolution = input_resolution
-        self.is_training = is_training
 
         # Lazy HDF5 file handle (opened once per DataLoader worker for performance)
         # Opening/closing file on every __getitem__ call creates massive I/O bottleneck
@@ -115,9 +113,7 @@ class CXRDataset(Dataset):
             # Already (H, W, C), rearrange to (C, H, W)
             image = image.permute(2, 0, 1)
 
-        # Apply transforms: augmentation + resize + CLIP normalization
-        # Training: RandomResizedCrop + HorizontalFlip + Normalize
-        # Validation: Resize + Normalize only
+        # Apply transforms: Normalize then Resize (CheXzero order)
         image = self.transform(image)
 
         # Get impression text
