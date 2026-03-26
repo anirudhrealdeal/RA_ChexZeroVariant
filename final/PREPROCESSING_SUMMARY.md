@@ -152,29 +152,6 @@ for i in range(0, n1, 1000):  # 1000 images at a time
 
 ---
 
-### Issue 4: Shape Mismatch Bug
-**Problem**: Merge function assumed 4D arrays `(N, H, W, C)` but HDF5 contains 3D grayscale `(N, H, W)`.
-
-**Error**:
-```python
-ValueError: not enough values to unpack (expected 4, got 3)
-```
-
-**Root Cause**:
-- Original `data_process.py` creates grayscale images: `Image.new('L', ...)`
-- HDF5 shape: `(223228, 320, 320)` - 3 dimensions
-- Merge code incorrectly expected: `(N, H, W, C)` - 4 dimensions
-
-**Solution**: Made merge function dimension-agnostic:
-```python
-# Before:
-n1, h1, w1, c1 = shape1  # Fails for 3D
-
-# After:
-n1 = shape1[0]
-combined_shape = (n1 + n2,) + shape1[1:]  # Works for any dimensions
-```
-
 **Verification**: Confirmed original CheXzero also uses grayscale (3D) format.
 
 ## Multiple Job Scripts
