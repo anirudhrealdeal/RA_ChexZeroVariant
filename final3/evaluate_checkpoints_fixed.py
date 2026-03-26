@@ -43,21 +43,9 @@ CHEXPERT_LABELS = [
     'Pleural Other', 'Pneumonia', 'Pneumothorax', 'Support Devices'
 ]
 
-# Ensemble of templates (following CheXzero strategy)
-# These are averaged to create robust text representations
-POS_TEMPLATES = [
-    "{}",
-    "findings suggestive of {}",
-    "findings consistent with {}",
-    "this is consistent with {}",
-]
-
-NEG_TEMPLATES = [
-    "no {}",
-    "no evidence of {}",
-    "no sign of {}",
-    "absence of {}",
-]
+# Original CheXzero uses a single positive/negative template pair
+POS_TEMPLATES = ["{}"]
+NEG_TEMPLATES = ["no {}"]
 
 
 class CXREvalDataset(torch.utils.data.Dataset):
@@ -150,42 +138,27 @@ def precompute_text_embeddings(model, tokenizer, device):
 
     with torch.no_grad():
         for label in tqdm(CHEXPERT_LABELS, desc="Encoding text"):
-            # === POSITIVE TEMPLATES ===
-            # Format all positive templates with the pathology name
-            pos_texts = [template.format(label) for template in POS_TEMPLATES]
+            # === POSITIVE TEMPLATE ===
+            sot_token = tokenizer.encoder["<|startoftext|>"]
+            eot_token = tokenizer.encoder["<|endoftext|>"]
 
-            # Tokenize all positive texts
-            pos_tokens_list = []
-            for text in pos_texts:
-                tokens = tokenizer.encode(text)
-                tokens = tokens[:77] + [0] * (77 - len(tokens))  # Pad to 77
-                pos_tokens_list.append(tokens)
-
-            pos_tokens = torch.tensor(pos_tokens_list, dtype=torch.long).to(device)  # (N_pos, 77)
-
-            # Encode all positive templates
-            pos_embeddings = model.encode_text(pos_tokens)  # (N_pos, 512)
-
-            # Average to get consensus positive representation (KEY STEP!)
-            pos_embed_avg = pos_embeddings.mean(dim=0)  # (512,)
-            pos_embed_avg = F.normalize(pos_embed_avg, dim=0)  # Renormalize after averaging
+            pos_text = POS_TEMPLATES[0].format(label)
+            pos_tok = [sot_token] + tokenizer.encode(pos_text) + [eot_token]
+            pos_tok = pos_tok[:77]
+            pos_tok[-1] = eot_token
+            pos_tok = pos_tok + [0] * (77 - len(pos_tok))
+            pos_tokens = torch.tensor([pos_tok], dtype=torch.long).to(device)  # (1, 77)
+            pos_embed_avg = model.encode_text(pos_tokens).squeeze(0)  # (512,)
             pos_embeds_list.append(pos_embed_avg)
 
-            # === NEGATIVE TEMPLATES ===
-            # Same process for negative templates
-            neg_texts = [template.format(label) for template in NEG_TEMPLATES]
-
-            neg_tokens_list = []
-            for text in neg_texts:
-                tokens = tokenizer.encode(text)
-                tokens = tokens[:77] + [0] * (77 - len(tokens))
-                neg_tokens_list.append(tokens)
-
-            neg_tokens = torch.tensor(neg_tokens_list, dtype=torch.long).to(device)  # (N_neg, 77)
-
-            neg_embeddings = model.encode_text(neg_tokens)  # (N_neg, 512)
-            neg_embed_avg = neg_embeddings.mean(dim=0)  # (512,)
-            neg_embed_avg = F.normalize(neg_embed_avg, dim=0)
+            # === NEGATIVE TEMPLATE ===
+            neg_text = NEG_TEMPLATES[0].format(label)
+            neg_tok = [sot_token] + tokenizer.encode(neg_text) + [eot_token]
+            neg_tok = neg_tok[:77]
+            neg_tok[-1] = eot_token
+            neg_tok = neg_tok + [0] * (77 - len(neg_tok))
+            neg_tokens = torch.tensor([neg_tok], dtype=torch.long).to(device)  # (1, 77)
+            neg_embed_avg = model.encode_text(neg_tokens).squeeze(0)  # (512,)
             neg_embeds_list.append(neg_embed_avg)
 
     # Stack into matrices
@@ -361,13 +334,13 @@ def main():
     # Initialize tokenizer
     tokenizer = SimpleTokenizer()
 
-    # Create validation dataset
-    clip_mean = [0.48145466, 0.4578275, 0.40821073]
-    clip_std = [0.26862954, 0.26130258, 0.27577711]
+    # Create validation dataset — same CXR stats and order as training
+    cxr_mean = [101.48761 / 255.0] * 3
+    cxr_std  = [83.43944  / 255.0] * 3
 
     transform = Compose([
+        Normalize(mean=cxr_mean, std=cxr_std),
         Resize(224, interpolation=InterpolationMode.BICUBIC),
-        Normalize(mean=clip_mean, std=clip_std)
     ])
 
     print("Loading validation dataset...")

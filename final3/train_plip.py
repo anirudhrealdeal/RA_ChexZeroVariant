@@ -73,17 +73,11 @@ class CXRDataset(Dataset):
         cxr_mean = [101.48761 / 255.0] * 3
         cxr_std  = [83.43944  / 255.0] * 3
 
-        # Training: resize to model input resolution + normalize (CheXzero approach)
-        if is_training:
-            self.transform = Compose([
-                Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
-                Normalize(mean=cxr_mean, std=cxr_std)
-            ])
-        else:
-            self.transform = Compose([
-                Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
-                Normalize(mean=cxr_mean, std=cxr_std)
-            ])
+        # Original CheXzero order: Normalize THEN Resize
+        self.transform = Compose([
+            Normalize(mean=cxr_mean, std=cxr_std),
+            Resize(input_resolution, interpolation=InterpolationMode.BICUBIC),
+        ])
 
         # Load CSV metadata
         self.df = pd.read_csv(csv_path)
@@ -131,14 +125,18 @@ class CXRDataset(Dataset):
         if pd.isna(impression) or impression == '' or impression == 'nan':
             impression = "No findings"
 
-        # Tokenize text
-        tokens = self.tokenizer.encode(impression)
+        # Tokenize text — original CheXzero wraps with SOT/EOT tokens
+        sot_token = self.tokenizer.encoder["<|startoftext|>"]
+        eot_token = self.tokenizer.encoder["<|endoftext|>"]
+        tokens = [sot_token] + self.tokenizer.encode(impression) + [eot_token]
 
-        # Truncate or pad to max_length
+        # Truncate to max_length, keeping EOT at the end
         if len(tokens) > self.max_length:
             tokens = tokens[:self.max_length]
-        else:
-            tokens = tokens + [0] * (self.max_length - len(tokens))
+            tokens[self.max_length - 1] = eot_token
+
+        # Pad to max_length
+        tokens = tokens + [0] * (self.max_length - len(tokens))
 
         tokens = torch.tensor(tokens, dtype=torch.long)
 
