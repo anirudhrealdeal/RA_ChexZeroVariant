@@ -92,7 +92,7 @@ def bootstrap_confidence_intervals(y_pred, y_true, n_bootstrap=1000):
     # Store AUROCs for each bootstrap sample
     bootstrap_aucs = []
 
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(97)  # Match original CheXzero eval.py
 
     for i in tqdm(range(n_bootstrap), desc="Bootstrap"):
         # Sample with replacement
@@ -281,13 +281,13 @@ def main():
     # Initialize tokenizer
     tokenizer = SimpleTokenizer()
 
-    # Create validation dataset
-    clip_mean = [0.48145466, 0.4578275, 0.40821073]
-    clip_std = [0.26862954, 0.26130258, 0.27577711]
+    # Create validation dataset — same CXR stats and order as training/evaluation
+    cxr_mean = [101.48761 / 255.0] * 3
+    cxr_std  = [83.43944  / 255.0] * 3
 
     transform = Compose([
+        Normalize(mean=cxr_mean, std=cxr_std),
         Resize(224, interpolation=InterpolationMode.BICUBIC),
-        Normalize(mean=clip_mean, std=clip_std)
     ])
 
     print("Loading validation dataset...")
